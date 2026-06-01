@@ -40,6 +40,8 @@
   <string name="setup_install">Download &amp; Install</string>
   <string name="setup_downloading_rootfs">Downloading %1$s rootfs…</string>
   <string name="setup_distro_hint">The image is fetched from the app\'s GitHub Releases and runs under proot.</string>
+  <string name="setup_reinstall">Reinstall (re-download)</string>
+  <string name="proot_unsupported_arch">Proot is only available on arm64 (aarch64) devices. This device reports \'%1$s\', so the Linux distribution cannot run. Use the system shell instead.</string>
 
   <string name="about">About</string>
   <string name="settings">Settings</string>

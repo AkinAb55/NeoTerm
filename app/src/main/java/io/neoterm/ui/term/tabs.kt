@@ -81,8 +81,6 @@ class NeoTabDecorator(val context: NeoTermActivity) : TabSwitcherDecorator() {
     context: Context, tabSwitcher: TabSwitcher,
     view: View, tab: Tab, index: Int, viewType: Int, savedInstanceState: Bundle?
   ) {
-    // TODO: Improve
-
     val toolbar = this@NeoTabDecorator.context.toolbar
     toolbar.title = if (tabSwitcher.isSwitcherShown) null else tab.title
 

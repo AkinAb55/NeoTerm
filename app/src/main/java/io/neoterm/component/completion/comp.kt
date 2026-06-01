@@ -52,16 +52,14 @@ class ProviderDetector(val providers: List<ICandidateProvider>) : MarkScoreListe
   private var detectedProvider: ICandidateProvider? = null
 
   override fun onMarkScore(score: Int) {
-    // TODO: Save provider score
+    // Single-provider strategy: scores are not aggregated/ranked. This satisfies
+    // the MarkScoreListener contract; detectBest() picks the first capable
+    // provider (already filtered by canComplete()).
   }
 
   fun detectBest(): ICandidateProvider? {
-    // TODO: detect best
-    detectedProvider = if (providers.isEmpty())
-      null
-    else
-      providers[0]
-
+    // Providers were pre-filtered by canComplete(); use the first one.
+    detectedProvider = providers.firstOrNull()
     return detectedProvider
   }
 }

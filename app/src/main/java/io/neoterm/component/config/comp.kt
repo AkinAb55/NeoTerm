@@ -68,6 +68,7 @@ object NeoPreference {
   const val KEY_SOURCES = "neoterm_package_enabled_sources"
   const val KEY_PROOT_ENABLED = "neoterm_core_proot_enabled"
   const val KEY_PROOT_DISTRO = "neoterm_core_proot_distro"
+  const val KEY_PROOT_SOURCE = "neoterm_core_proot_source"
 
   const val VALUE_HAPPY_EGG_TRIGGER = 8
 
@@ -185,6 +186,19 @@ object NeoPreference {
 
   fun setProotDistro(distroId: String) {
     store(KEY_PROOT_DISTRO, distroId)
+  }
+
+  /**
+   * A proot bináris + rootfs-ek kiszolgáló base-URL-je. Alapból az app saját
+   * GitHub Release-eire mutat ([NeoTermPath.DEFAULT_PROOT_SOURCE]); fork esetén
+   * felülírható.
+   */
+  fun getProotSource(): String {
+    return loadString(KEY_PROOT_SOURCE, NeoTermPath.DEFAULT_PROOT_SOURCE)
+  }
+
+  fun setProotSource(url: String) {
+    store(KEY_PROOT_SOURCE, url)
   }
 
   fun getLoginShellPath(): String {
@@ -327,9 +341,9 @@ object NeoPreference {
   }
 
   /**
-   * TODO
-   * To print the job name about to be executed in bash:
-   * $ trap 'echo -ne "\e]0;${BASH_COMMAND%% *}\x07"' DEBUG
-   * $ PS1='$(echo -ne "\e]0;$PWD\x07")\$ '
+   * Note: to show the running command / cwd in the terminal title bar, set in
+   * the guest shell (the title is read from the OSC 0 escape we already parse):
+   *   $ trap 'echo -ne "\e]0;${BASH_COMMAND%% *}\x07"' DEBUG
+   *   $ PS1='$(echo -ne "\e]0;$PWD\x07")\$ '
    */
 }

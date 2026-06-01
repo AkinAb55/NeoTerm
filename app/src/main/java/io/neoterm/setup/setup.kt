@@ -61,12 +61,27 @@ object SetupHelper {
   fun setupProot(
     activity: AppCompatActivity,
     resultListener: ResultListener,
-    baseUrl: String = NeoTermPath.DEFAULT_PROOT_SOURCE,
-    distro: Distro = ProotManager.selectedDistro()
+    baseUrl: String = NeoPreference.getProotSource(),
+    distro: Distro = ProotManager.selectedDistro(),
+    forceReinstall: Boolean = false
   ) {
-    if (!needSetup()) {
+    val arch = determineArchName()
+    if (!ProotManager.isArchSupported(arch)) {
+      resultListener.onResult(
+        RuntimeException(activity.getString(R.string.proot_unsupported_arch, arch))
+      )
+      return
+    }
+
+    if (!forceReinstall && !needSetup()) {
       resultListener.onResult(null)
       return
+    }
+
+    // Force reinstall (or distro switch): drop the old rootfs first so the
+    // download replaces it cleanly and corrupted installs can be recovered.
+    if (forceReinstall) {
+      ProotManager.uninstall(distro)
     }
 
     val progress = makeProgressDialog(activity, activity.getString(R.string.installer_message))
@@ -75,7 +90,7 @@ object SetupHelper {
     progress.show()
 
     ProotInstaller(
-      activity, distro, determineArchName(), baseUrl, resultListener, progress
+      activity, distro, arch, baseUrl, resultListener, progress
     ).start()
   }
 

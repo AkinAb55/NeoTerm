@@ -3,6 +3,7 @@ package io.neoterm.setup.proot
 import android.app.ProgressDialog
 import android.system.Os
 import androidx.appcompat.app.AppCompatActivity
+import io.neoterm.R
 import io.neoterm.backend.EmulatorDebug
 import io.neoterm.component.config.NeoTermPath
 import io.neoterm.setup.ResultListener
@@ -37,6 +38,13 @@ class ProotInstaller(
   private val resultListener: ResultListener,
   private val progressDialog: ProgressDialog
 ) : Thread() {
+
+  companion object {
+    // Minimum free space required before extracting a rootfs (covers the
+    // smaller distros; a larger rootfs that still runs out mid-extract surfaces
+    // a clear IO error which is reported to the user anyway).
+    private const val MIN_FREE_BYTES = 300L * 1024 * 1024
+  }
 
   override fun run() {
     try {
@@ -76,7 +84,19 @@ class ProotInstaller(
 
   // ── rootfs ────────────────────────────────────────────────────────────
   private fun installRootfs() {
-    setMessage("Downloading ${distro.displayName} rootfs…")
+    setMessage(activity.getString(R.string.setup_downloading_rootfs, distro.displayName))
+
+    val rootfsRoot = File(NeoTermPath.ROOTFS_PATH)
+    rootfsRoot.mkdirs()
+    // Basic free-space guard so we fail early with a clear message instead of
+    // an opaque IO error mid-extraction.
+    val freeBytes = rootfsRoot.usableSpace
+    if (freeBytes in 1 until MIN_FREE_BYTES) {
+      throw RuntimeException(
+        "Not enough free storage to install ${distro.displayName} " +
+          "(need ~${MIN_FREE_BYTES / (1024 * 1024)} MB, have ${freeBytes / (1024 * 1024)} MB)."
+      )
+    }
 
     val stagingDir = File("${distro.rootfsPath()}-staging")
     if (stagingDir.exists()) deleteRecursively(stagingDir)

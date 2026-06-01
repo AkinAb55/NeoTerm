@@ -11,10 +11,10 @@ import androidx.appcompat.app.AppCompatActivity
 import io.neoterm.App
 import io.neoterm.R
 import io.neoterm.component.config.NeoPreference
-import io.neoterm.component.config.NeoTermPath
 import io.neoterm.setup.ResultListener
 import io.neoterm.setup.SetupHelper
 import io.neoterm.setup.proot.Distro
+import io.neoterm.setup.proot.ProotManager
 
 /**
  * A proot futtatókörnyezet beállító-képernyője.
@@ -27,6 +27,11 @@ import io.neoterm.setup.proot.Distro
  * @author kiva
  */
 class SetupActivity : AppCompatActivity(), ResultListener {
+
+  companion object {
+    /** Set by "Reset App" to force a re-download even if already installed. */
+    const val EXTRA_FORCE_REINSTALL = "force_reinstall"
+  }
 
   private lateinit var distroGroup: RadioGroup
   private lateinit var installButton: Button
@@ -42,6 +47,10 @@ class SetupActivity : AppCompatActivity(), ResultListener {
     hintText = findViewById(R.id.setup_distro_hint_text)
 
     populateDistros()
+
+    if (intent.getBooleanExtra(EXTRA_FORCE_REINSTALL, false)) {
+      installButton.setText(R.string.setup_reinstall)
+    }
 
     installButton.setOnClickListener { startInstall() }
   }
@@ -82,9 +91,16 @@ class SetupActivity : AppCompatActivity(), ResultListener {
     installing = true
     setInputsEnabled(false)
 
+    // Force a re-download if launched from "Reset App", or if the chosen distro
+    // is already installed (the user explicitly re-ran setup for it).
+    val force = intent.getBooleanExtra(EXTRA_FORCE_REINSTALL, false) ||
+      ProotManager.isInstalled(distro)
+
     // A SetupHelper egy folyamatjelző dialógust mutat, és a háttérszálon
     // letölti + kibontja a kiválasztott disztró rootfs-ét a release-ekből.
-    SetupHelper.setupProot(this, this, NeoTermPath.DEFAULT_PROOT_SOURCE, distro)
+    SetupHelper.setupProot(
+      this, this, NeoPreference.getProotSource(), distro, force
+    )
   }
 
   override fun onResult(error: Exception?) {

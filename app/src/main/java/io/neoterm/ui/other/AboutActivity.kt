@@ -144,7 +144,11 @@ class AboutActivity : AppCompatActivity() {
   }
 
   private fun resetApp() {
-    startActivity(Intent(this, SetupActivity::class.java))
+    // Force a fresh download/extract of the selected distro's rootfs.
+    startActivity(
+      Intent(this, SetupActivity::class.java)
+        .putExtra(SetupActivity.EXTRA_FORCE_REINSTALL, true)
+    )
   }
 
   private fun openUrl(url: String) {

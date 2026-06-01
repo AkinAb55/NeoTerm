@@ -10,12 +10,12 @@ import android.os.IBinder
 import android.preference.PreferenceManager
 import android.view.*
 import android.view.inputmethod.InputMethodManager
-import android.widget.ImageButton
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.ColorUtils
 import androidx.core.view.OnApplyWindowInsetsListener
 import androidx.core.view.ViewCompat
 import de.mrapp.android.tabswitcher.*
@@ -323,6 +323,15 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     }
     window.statusBarColor = bg
     window.navigationBarColor = bg
+
+    // Use dark status/navigation icons on a light background and light icons on
+    // a dark one, so they stay legible whatever color scheme is active.
+    val lightBackground = ColorUtils.calculateLuminance(bg) > 0.5
+    val lightBarFlags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
+      View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+    var flags = window.decorView.systemUiVisibility
+    flags = if (lightBackground) flags or lightBarFlags else flags and lightBarFlags.inv()
+    window.decorView.systemUiVisibility = flags
   }
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -444,7 +453,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     // Open a system shell like any other session: no switcher reveal/animation,
     // routed through the normal add path so the current profile (extra keys,
     // etc.) applies.
-    addNewSession(null, true, createRevealAnimation())
+    addNewSession(null, true)
   }
 
   private fun enterMain() {
@@ -463,10 +472,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
 
       if (intent?.action == Intent.ACTION_RUN) {
         // app shortcuts
-        addNewSession(
-          null,
-          false, createRevealAnimation()
-        )
+        addNewSession(null, false)
       } else {
         switchToSession(lastSession)
       }
@@ -474,7 +480,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     } else {
       // Fore system shell mode to be disabled. No switcher reveal -> the first
       // session opens directly with the keyboard up.
-      addNewSession(null, false, createRevealAnimation())
+      addNewSession(null, false)
     }
   }
 
@@ -537,20 +543,17 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
 
   private fun addNewSession() = addNewSessionWithProfile(ShellProfile.create())
 
-  private fun addNewSession(sessionName: String?, systemShell: Boolean, animation: Animation) =
-    addNewSessionWithProfile(sessionName, systemShell, animation, ShellProfile.create())
+  private fun addNewSession(sessionName: String?, systemShell: Boolean) =
+    addNewSessionWithProfile(sessionName, systemShell, ShellProfile.create())
 
   private fun addNewSessionWithProfile(profile: ShellProfile) {
     // No switcher reveal: open the new session directly (no animation).
-    addNewSessionWithProfile(
-      null, getSystemShellMode(),
-      createRevealAnimation(), profile
-    )
+    addNewSessionWithProfile(null, getSystemShellMode(), profile)
   }
 
   private fun addNewSessionWithProfile(
     sessionName: String?, systemShell: Boolean,
-    animation: Animation, profile: ShellProfile
+    profile: ShellProfile
   ) {
     val sessionCallback = TermSessionCallback()
     val viewClient = TermViewClient(this)
@@ -566,7 +569,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     val tab = createTab(session.mSessionName) as TermTab
     tab.termData.initializeSessionWith(session, sessionCallback, viewClient)
 
-    addNewTab(tab, animation)
+    addNewTab(tab)
     switchToSession(tab)
   }
 
@@ -589,7 +592,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     val tab = createTab(session.title) as TermTab
     tab.termData.initializeSessionWith(session, sessionCallback, viewClient)
 
-    addNewTab(tab, createRevealAnimation())
+    addNewTab(tab)
     switchToSession(tab)
   }
 
@@ -614,7 +617,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     val tab = createXTab(session.mSessionName) as XSessionTab
     tab.session = session
 
-    addNewTab(tab, createRevealAnimation())
+    addNewTab(tab)
     switchToSession(tab)
   }
 
@@ -633,7 +636,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
 
     val tab = createXTab(session.mSessionName) as XSessionTab
 
-    addNewTab(tab, createRevealAnimation())
+    addNewTab(tab)
     switchToSession(tab)
   }
 
@@ -666,7 +669,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     tabSwitcher.selectTab(tab)
   }
 
-  private fun addNewTab(tab: Tab, animation: Animation) {
+  private fun addNewTab(tab: Tab) {
     // Add without animation and keep the switcher hidden: the tab is added and
     // then selected (switchToSession) instantly, with no reveal/swipe animation.
     tabSwitcher.addTab(tab, 0)
@@ -702,37 +705,6 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     tab.setBackgroundColor(ContextCompat.getColor(this, R.color.tab_background_color))
     tab.setTitleTextColor(ContextCompat.getColor(this, R.color.tab_title_text_color))
     return tab
-  }
-
-  private fun createRevealAnimation(): Animation {
-    var x = 0f
-    var y = 0f
-    val view = getNavigationMenuItem()
-
-    if (view != null) {
-      val location = IntArray(2)
-      view.getLocationInWindow(location)
-      x = location[0] + view.width / 2f
-      y = location[1] + view.height / 2f
-    }
-
-    return RevealAnimation.Builder().setX(x).setY(y).create()
-  }
-
-  private fun getNavigationMenuItem(): View? {
-    val toolbars = tabSwitcher.toolbars
-
-    if (toolbars != null) {
-      val toolbar = if (toolbars.size > 1) toolbars[1] else toolbars[0]
-      val size = toolbar.childCount
-
-      (0 until size)
-        .map { toolbar.getChildAt(it) }
-        .filterIsInstance(ImageButton::class.java)
-        .forEach { return it }
-    }
-
-    return null
   }
 
   private fun createWindowInsetsListener(): OnApplyWindowInsetsListener {

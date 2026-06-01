@@ -62,6 +62,26 @@ object ProotManager {
     isProotBinaryInstalled() && isRootfsInstalled(distro)
 
   /**
+   * Csak azokat az archokat támogatjuk, amikhez van proot bináris: a beépített
+   * libproot.so (arm64) vagy a letölthető aarch64. Más archon (armeabi-v7a,
+   * x86_64) nincs proot, ezért a setup értelmes hibát ad vissza, nem 404-et.
+   */
+  fun isArchSupported(arch: String): Boolean =
+    bundledProotPath() != null || arch == "aarch64"
+
+  /** A megadott disztró rootfs-ének (és staging-jének) törlése. */
+  fun uninstall(distro: Distro) {
+    deleteRecursively(File(distro.rootfsPath()))
+    deleteRecursively(File("${distro.rootfsPath()}-staging"))
+  }
+
+  private fun deleteRecursively(file: File) {
+    if (!file.exists()) return
+    if (file.isDirectory) file.listFiles()?.forEach { deleteRecursively(it) }
+    file.delete()
+  }
+
+  /**
    * Összeállítja a proot indítási parancssorát.
    *
    * @param loginShell guest-oldali shell útvonal; ha null, a disztró
