@@ -99,6 +99,11 @@ object ProotManager {
     bind(args, "/proc/self/fd/2", "/dev/stderr")
     bind(args, "/dev/urandom", "/dev/random")
 
+    // Fake /proc fájlok (proot-distro sysdata mintájára): az Android korlátozott
+    // /proc-ja miatt a ps/top/uptime/free hibára futna ("Unable to get system
+    // boot time"). A /proc bind UTÁN kötjük, hogy a konkrétabb bind felülírja.
+    ProotSysData.bindings().forEach { (fake, real) -> bind(args, fake, real) }
+
     // Külső tároló átkötése, ha elérhető — kényelmi /sdcard.
     System.getenv("EXTERNAL_STORAGE")?.let { ext ->
       if (File(ext).isDirectory) bind(args, ext, "/sdcard")
