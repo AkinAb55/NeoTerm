@@ -62,7 +62,7 @@ interface TermUiPresenter {
   fun requireToggleFullScreen()
   fun requirePaste()
   fun requireUpdateTitle(title: String?)
-  fun requireOnSessionFinished()
+  fun requireOnSessionFinished(exitCode: Int)
   fun requireHideIme()
   fun requireFinishAutoCompletion(): Boolean
   fun requireCreateNew()

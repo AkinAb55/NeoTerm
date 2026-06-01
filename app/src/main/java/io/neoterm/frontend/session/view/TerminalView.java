@@ -225,6 +225,16 @@ public final class TerminalView extends View {
         // 选择文字时，文字选择器会用到触摸操作，这里不管
         if (mEmulator == null || mIsSelectingText) return true;
 
+        // A predominantly horizontal flick pages between tabs. Vertical
+        // scrolling is unaffected (it is driven by onScroll's distanceY, which
+        // stays small during a horizontal swipe).
+        if (mClient != null
+          && Math.abs(velocityX) > Math.abs(velocityY) * 1.5f
+          && Math.abs(velocityX) > dpToPx(160)) {
+          mClient.onSwipe(velocityX < 0);
+          return true;
+        }
+
         // Do not start scrolling until last fling has been taken care of:
         if (!mScroller.isFinished()) return true;
 

@@ -84,4 +84,8 @@ class BasicViewClient(val terminalView: TerminalView) : TerminalViewClient {
   override fun onLongPress(event: MotionEvent?): Boolean {
     return false
   }
+
+  override fun onSwipe(toLeft: Boolean) {
+    // Floating/basic terminal has no tabs.
+  }
 }

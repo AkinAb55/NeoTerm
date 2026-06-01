@@ -37,4 +37,13 @@ public interface TerminalViewClient {
 
   boolean onLongPress(MotionEvent event);
 
+  /**
+   * A horizontal swipe (fling) was detected on the terminal. Used to page
+   * between tabs without interfering with vertical scrolling.
+   *
+   * @param toLeft true if the finger moved left (go to the next tab), false if
+   *               it moved right (previous tab).
+   */
+  void onSwipe(boolean toLeft);
+
 }

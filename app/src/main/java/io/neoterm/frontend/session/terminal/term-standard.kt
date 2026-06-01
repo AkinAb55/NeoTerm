@@ -210,6 +210,12 @@ class TermViewClient(val context: Context) : TerminalViewClient {
     return false
   }
 
+  override fun onSwipe(toLeft: Boolean) {
+    // Page between tabs: swipe left -> next session, swipe right -> previous.
+    val termUI = termSessionData?.termUI ?: return
+    if (toLeft) termUI.requireSwitchToNext() else termUI.requireSwitchToPrevious()
+  }
+
   private fun handleVirtualKeys(keyCode: Int, event: KeyEvent?, down: Boolean): Boolean {
     if (event == null) {
       return false
@@ -298,7 +304,9 @@ class TermSessionCallback : TerminalSession.SessionChangedCallback {
   }
 
   override fun onSessionFinished(finishedSession: TerminalSession?) {
-    termSessionData?.termUI?.requireOnSessionFinished()
+    // Exit status is set just before this callback fires.
+    val exitCode = finishedSession?.exitStatus ?: 0
+    termSessionData?.termUI?.requireOnSessionFinished(exitCode)
   }
 
   override fun onClipboardText(session: TerminalSession?, text: String?) {

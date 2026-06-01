@@ -98,7 +98,13 @@ class NeoTabDecorator(val context: NeoTermActivity) : TabSwitcherDecorator() {
         } else {
           val extraKeysView = findViewById<ExtraKeysView>(R.id.extra_keys)
           bindTerminalView(termTab, terminalView, extraKeysView)
+          // Always grab focus and raise the keyboard for the active terminal
+          // (but not while the switcher overview is shown).
           terminalView.requestFocus()
+          if (!tabSwitcher.isSwitcherShown) {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
+          }
         }
       }
 
@@ -321,8 +327,13 @@ class TermTab(title: CharSequence) : NeoTab(title), TermUiPresenter {
     }
   }
 
-  override fun requireOnSessionFinished() {
-    // do nothing
+  override fun requireOnSessionFinished(exitCode: Int) {
+    // A clean exit (0) closes the tab automatically, no Enter needed. A
+    // non-zero exit keeps the tab open so the error/exit message stays visible
+    // (press Enter to close).
+    if (exitCode == 0) {
+      requireClose()
+    }
   }
 
   override fun requireCreateNew() {
