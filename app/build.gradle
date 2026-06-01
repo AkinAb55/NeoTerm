@@ -71,8 +71,10 @@ dependencies {
   implementation 'org.tukaani:xz:1.9'
 
   implementation 'org.greenrobot:eventbus:3.0.0'
-  implementation 'com.github.wrdlbrnft:modular-adapter:0.2.0.6'
-  implementation 'com.github.wrdlbrnft:sorted-list-adapter:0.2.0.19'
+  // A com.github.wrdlbrnft:modular-adapter / :sorted-list-adapter csak a
+  // megszűnt jcenteren léteztek (git tag nélkül, jitpack sem építi) — a
+  // ténylegesen használt SortedListAdapter felületet helyben hozzuk:
+  // app/src/main/java/com/github/wrdlbrnft/sortedlistadapter/SortedListAdapter.kt
   implementation 'com.simplecityapps:recyclerview-fastscroll:1.0.16'
   implementation 'de.psdev.licensesdialog:licensesdialog:1.8.3'
   implementation 'com.github.GrenderG:Color-O-Matic:1.1.5'
