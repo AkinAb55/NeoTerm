@@ -99,12 +99,9 @@ class NeoTabDecorator(val context: NeoTermActivity) : TabSwitcherDecorator() {
           val extraKeysView = findViewById<ExtraKeysView>(R.id.extra_keys)
           bindTerminalView(termTab, terminalView, extraKeysView)
           // Always grab focus and raise the keyboard for the active terminal
-          // (but not while the switcher overview is shown).
+          // (posted + switcher-aware; no-op while the switcher overview shows).
           terminalView.requestFocus()
-          if (!tabSwitcher.isSwitcherShown) {
-            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
-          }
+          this.context.raiseKeyboard(terminalView)
         }
       }
 

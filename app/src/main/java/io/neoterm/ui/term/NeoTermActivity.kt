@@ -207,6 +207,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         toolbar.navigationIcon = null
         toolbar.setNavigationOnClickListener(null)
         toolbar.setBackgroundResource(R.color.colorPrimary)
+        // Returned to a single terminal: focus it and raise the keyboard.
+        raiseKeyboardForSelectedTab()
       }
 
       override fun onSelectionChanged(tabSwitcher: TabSwitcher, selectedTabIndex: Int, selectedTab: Tab?) {
@@ -271,6 +273,30 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     super.onWindowFocusChanged(hasFocus)
     val tab = tabSwitcher.selectedTab as NeoTab?
     tab?.onWindowFocusChanged(hasFocus)
+    if (hasFocus) {
+      raiseKeyboardForSelectedTab()
+    }
+  }
+
+  /**
+   * Grab focus on the active terminal and raise the soft keyboard. Posted to
+   * the view so it runs after the view is attached/laid out (otherwise
+   * requestFocus/showSoftInput silently no-op). No-op while the switcher
+   * overview is shown.
+   */
+  fun raiseKeyboard(view: View) {
+    view.post {
+      if (tabSwitcher.isSwitcherShown) return@post
+      view.requestFocus()
+      val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+      imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+    }
+  }
+
+  private fun raiseKeyboardForSelectedTab() {
+    val tab = tabSwitcher.selectedTab as? TermTab ?: return
+    val view = tab.termData.termView ?: return
+    raiseKeyboard(view)
   }
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -411,8 +437,8 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       }
 
     } else {
-      toggleSwitcher(showSwitcher = true, easterEgg = false)
-      // Fore system shell mode to be disabled.
+      // Fore system shell mode to be disabled. No switcher reveal -> the first
+      // session opens directly with the keyboard up.
       addNewSession(null, false, createRevealAnimation())
     }
   }
@@ -480,9 +506,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     addNewSessionWithProfile(sessionName, systemShell, animation, ShellProfile.create())
 
   private fun addNewSessionWithProfile(profile: ShellProfile) {
-    if (!tabSwitcher.isSwitcherShown) {
-      toggleSwitcher(showSwitcher = true, easterEgg = false)
-    }
+    // No switcher reveal: open the new session directly (no animation).
     addNewSessionWithProfile(
       null, getSystemShellMode(),
       createRevealAnimation(), profile
@@ -608,7 +632,9 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   }
 
   private fun addNewTab(tab: Tab, animation: Animation) {
-    tabSwitcher.addTab(tab, 0, animation)
+    // Add without animation and keep the switcher hidden: the tab is added and
+    // then selected (switchToSession) instantly, with no reveal/swipe animation.
+    tabSwitcher.addTab(tab, 0)
   }
 
   private fun getStoredCurrentSessionOrLast(): TerminalSession? {
@@ -717,7 +743,12 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   @Subscribe(threadMode = ThreadMode.MAIN)
   fun onTabCloseEvent(tabCloseEvent: TabCloseEvent) {
     val tab = tabCloseEvent.termTab
-    toggleSwitcher(showSwitcher = true, easterEgg = false)
+    // Only reveal the switcher when closing the LAST tab (so the add button is
+    // available). Otherwise remove instantly with the switcher hidden -> the
+    // layout just swaps to the neighbour with no close animation.
+    if (tabSwitcher.count <= 1) {
+      toggleSwitcher(showSwitcher = true, easterEgg = false)
+    }
     tabSwitcher.removeTab(tab)
 
     if (tabSwitcher.count > 1) {
