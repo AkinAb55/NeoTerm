@@ -36,6 +36,10 @@
   <string name="setup_confirm_text">Everything goes well till now, continue?</string>
   <string name="setup_reset_confirm">Reset Confirm</string>
   <string name="setup_reset_confirm_text">This operation will clear all your data! Continue?</string>
+  <string name="setup_choose_distro">Choose a Linux distribution to download and install:</string>
+  <string name="setup_install">Download &amp; Install</string>
+  <string name="setup_downloading_rootfs">Downloading %1$s rootfs…</string>
+  <string name="setup_distro_hint">The image is fetched from the app\'s GitHub Releases and runs under proot.</string>
 
   <string name="about">About</string>
   <string name="settings">Settings</string>

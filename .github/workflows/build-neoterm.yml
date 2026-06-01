@@ -1,9 +1,10 @@
 name: Build NeoTerm
 
-# Manuálisan indítható build. A GitHub UI-on: Actions → "Build NeoTerm" →
-# Run workflow. Előbb lefordítja a proot binárist, majd ezt beágyazva
-# (libproot.so) lebuildeli a NeoTerm APK-t. Az APK build függ a proot
-# bináristól (needs: build-proot), így csak akkor indul, ha a proot kész.
+# Manuálisan indítható build + release. A GitHub UI-on: Actions →
+# "Build NeoTerm" → Run workflow. Lefordítja a proot binárist, beágyazva
+# (libproot.so) lebuildeli az APK-t, legyártja a disztró-rootfs-eket, majd
+# mindezt egyetlen GitHub Release-be tölti fel — innen tölti a setup-képernyő
+# a kiválasztott rootfs-t.
 on:
   workflow_dispatch:
     inputs:
@@ -14,14 +15,18 @@ on:
         options:
           - debug
           - release
-      fetch_rootfs:
-        description: "disztró-rootfs-ek letöltése + csomagolása (lassú, külön artefaktum)"
-        type: boolean
-        default: false
       distros:
-        description: "rootfs disztrók (szóközzel elválasztva)"
+        description: "release-be kerülő rootfs disztrók (szóközzel)"
         type: string
         default: "ubuntu alpine kali arch"
+      release_tag:
+        description: "GitHub Release tag"
+        type: string
+        default: "proot-latest"
+      publish_release:
+        description: "GitHub Release közzététele (APK + proot + rootfs)"
+        type: boolean
+        default: true
 
 env:
   NDK_VERSION: "21.4.7075529"
@@ -132,10 +137,9 @@ jobs:
           path: app/build/outputs/apk/**/*.apk
           if-no-files-found: error
 
-  # ── 3) disztró-rootfs-ek (opcionális, lassú) ────────────────────────────
+  # ── 3) disztró-rootfs-ek ────────────────────────────────────────────────
   fetch-rootfs:
     name: rootfs tarballs
-    if: ${{ inputs.fetch_rootfs }}
     runs-on: ubuntu-latest
     steps:
       - name: Clone repository
@@ -157,3 +161,54 @@ jobs:
           name: rootfs-aarch64
           path: out/rootfs/**
           if-no-files-found: error
+
+  # ── 4) GitHub Release: APK + proot + rootfs-ek ──────────────────────────
+  release:
+    name: Publish GitHub Release
+    if: ${{ inputs.publish_release }}
+    needs: [build-apk, build-proot, fetch-rootfs]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage release assets (flat names the app expects)
+        run: |
+          mkdir -p assets
+          # proot bináris → proot-aarch64
+          cp artifacts/proot-aarch64/proot assets/proot-aarch64
+          # APK(ok)
+          find artifacts -name '*.apk' -exec cp {} assets/ \;
+          # rootfs: artifacts/rootfs-aarch64/<distro>/aarch64.tar.xz[.sha256]
+          #      →  rootfs-<distro>-aarch64.tar.xz[.sha256]
+          if [ -d artifacts/rootfs-aarch64 ]; then
+            for dir in artifacts/rootfs-aarch64/*/; do
+              distro="$(basename "${dir}")"
+              for f in "${dir}"aarch64.tar.xz "${dir}"aarch64.tar.xz.sha256; do
+                [ -f "${f}" ] || continue
+                cp "${f}" "assets/rootfs-${distro}-$(basename "${f}")"
+              done
+            done
+          fi
+          echo "── release assets ──"
+          ls -lh assets
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "NeoTerm proot ($TAG)" \
+              --notes "proot-alapú NeoTerm. Tartalom: APK, proot bináris (aarch64) és a disztró-rootfs-ek (Ubuntu/Alpine/Kali/Arch). A setup-képernyő ezekből tölti a kiválasztott rootfs-t." \
+              --latest
+          fi
+          gh release upload "$TAG" assets/* --clobber

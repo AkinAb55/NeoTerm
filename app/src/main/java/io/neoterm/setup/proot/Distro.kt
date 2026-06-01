@@ -27,11 +27,11 @@ enum class Distro(
   fun rootfsPath(): String = "${NeoTermPath.ROOTFS_PATH}/$id"
 
   /**
-   * A rootfs-tarball letöltési URL-je az adott archra.
-   * Layout: `<base>/rootfs/<id>/<arch>.tar.xz`
+   * A rootfs-tarball letöltési URL-je az adott archra. A GitHub Release
+   * asset-nevek laposak: `<base>/rootfs-<id>-<arch>.tar.xz`
    */
   fun rootfsUrl(baseUrl: String, arch: String): String =
-    "$baseUrl/rootfs/$id/$arch.tar.xz"
+    "$baseUrl/rootfs-$id-$arch.tar.xz"
 
   fun rootfsSha256Url(baseUrl: String, arch: String): String =
     "${rootfsUrl(baseUrl, arch)}.sha256"
@@ -43,10 +43,11 @@ enum class Distro(
       values().firstOrNull { it.id == id } ?: DEFAULT
 
     /**
-     * A proot bináris letöltési URL-je. A proot disztró-független, csak az
-     * archtól függ. Layout: `<base>/proot/<arch>/proot`
+     * A proot bináris letöltési URL-je (fallback, ha nincs APK-ba csomagolva).
+     * A proot disztró-független, csak az archtól függ.
+     * Layout: `<base>/proot-<arch>`
      */
     fun prootUrl(baseUrl: String, arch: String): String =
-      "$baseUrl/proot/$arch/proot"
+      "$baseUrl/proot-$arch"
   }
 }

@@ -58,11 +58,12 @@ object NeoTermPath {
 
   private const val SOURCE = "https://raw.githubusercontent.com/NeoTerm/NeoTerm-repo/main"
 
-  // A proot bináris + disztró-rootfs-ek kiszolgáló base-URL-je. A layoutot
-  // a Claude-repo proot/ rendszere állítja elő:
-  //   <base>/proot/<arch>/proot
-  //   <base>/rootfs/<distro>/<arch>.tar.xz
-  private const val PROOT_SOURCE = "https://raw.githubusercontent.com/NeoTerm/NeoTerm-proot/main"
+  // A proot bináris + disztró-rootfs-ek kiszolgáló base-URL-je: az app saját
+  // GitHub Release-ei. A "latest/download" mindig a legutóbbi release-re mutat;
+  // az asset-nevek laposak (a release-ek nem támogatnak alkönyvtárat):
+  //   <base>/proot-<arch>
+  //   <base>/rootfs-<distro>-<arch>.tar.xz
+  private const val PROOT_SOURCE = "https://github.com/9hm2/NeoTerm-pr/releases/latest/download"
 
   val DEFAULT_MAIN_PACKAGE_SOURCE: String
   val DEFAULT_PROOT_SOURCE: String

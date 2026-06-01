@@ -1,253 +1,129 @@
 package io.neoterm.ui.other
 
-import android.content.ActivityNotFoundException
-import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
-import android.view.LayoutInflater
 import android.view.View
-import android.widget.*
+import android.widget.Button
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import io.neoterm.App
 import io.neoterm.R
 import io.neoterm.component.config.NeoPreference
 import io.neoterm.component.config.NeoTermPath
-import io.neoterm.component.pm.SourceHelper
-import io.neoterm.setup.*
-import io.neoterm.utils.getPathOfMediaUri
-import io.neoterm.utils.runApt
-import java.io.File
-
+import io.neoterm.setup.ResultListener
+import io.neoterm.setup.SetupHelper
+import io.neoterm.setup.proot.Distro
 
 /**
+ * A proot futtatókörnyezet beállító-képernyője.
+ *
+ * A felhasználó egy listából (RadioGroup) választja ki a Linux-disztrót; a
+ * kiválasztott disztró rootfs-ét a SetupHelper a GitHub Release-ekből tölti le
+ * és bontja ki. A proot bináris már az APK-ba van csomagolva (libproot.so),
+ * így csak a rootfs-t kell letölteni.
+ *
  * @author kiva
  */
-class SetupActivity : AppCompatActivity(), View.OnClickListener, ResultListener {
-  companion object {
-    private const val REQUEST_SELECT_PARAMETER = 520;
-  }
+class SetupActivity : AppCompatActivity(), ResultListener {
 
-  private var setupParameter = ""
-  private var setupParameterUri: Uri? = null
-
-  private val hintMapping = arrayOf(
-    R.id.setup_method_online, R.string.setup_hint_online,
-    R.id.setup_method_local, R.string.setup_hint_local,
-    R.id.setup_method_backup, R.string.setup_hint_backup
-  )
+  private lateinit var distroGroup: RadioGroup
+  private lateinit var installButton: Button
+  private lateinit var hintText: TextView
+  private var installing = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     setContentView(R.layout.ui_setup)
 
-    val parameterEditor = findViewById<EditText>(R.id.setup_source_parameter)
+    distroGroup = findViewById(R.id.setup_distro_group)
+    installButton = findViewById(R.id.setup_install)
+    hintText = findViewById(R.id.setup_distro_hint_text)
 
-    val tipText = findViewById<TextView>(R.id.setup_url_tip_text)
+    populateDistros()
 
-    val onCheckedChangeListener = CompoundButton.OnCheckedChangeListener { button, checked ->
-      if (checked) {
-        val id = button.id
-        val index = hintMapping.indexOf(id)
-        if (index < 0 || index % 2 != 0) {
-          parameterEditor.setHint(R.string.setup_input_source_parameter)
-          return@OnCheckedChangeListener
-        }
-        parameterEditor.setHint(hintMapping[index + 1])
-        tipText.setText(hintMapping[index + 1])
-        setDefaultValue(parameterEditor, id)
+    installButton.setOnClickListener { startInstall() }
+  }
+
+  private fun populateDistros() {
+    val current = Distro.fromId(NeoPreference.getProotDistro())
+    Distro.values().forEach { distro ->
+      val button = RadioButton(this).apply {
+        id = View.generateViewId()
+        text = distro.displayName
+        tag = distro
+        textSize = 16f
+        setPadding(paddingLeft, dp(12), paddingRight, dp(12))
+      }
+      distroGroup.addView(button)
+      if (distro == current) {
+        distroGroup.check(button.id)
       }
     }
-
-    findViewById<RadioButton>(R.id.setup_method_online).setOnCheckedChangeListener(onCheckedChangeListener)
-    findViewById<RadioButton>(R.id.setup_method_local).setOnCheckedChangeListener(onCheckedChangeListener)
-    findViewById<RadioButton>(R.id.setup_method_backup).setOnCheckedChangeListener(onCheckedChangeListener)
-
-    findViewById<Button>(R.id.setup_next).setOnClickListener(this)
-    findViewById<Button>(R.id.setup_source_parameter_select).setOnClickListener(this)
-  }
-
-  override fun onClick(view: View?) {
-    val clickedId = view?.id ?: return
-    when (clickedId) {
-      R.id.setup_source_parameter_select -> doSelectParameter()
-      R.id.setup_next -> doPrepareSetup()
+    if (distroGroup.checkedRadioButtonId == View.NO_ID && distroGroup.childCount > 0) {
+      distroGroup.check(distroGroup.getChildAt(0).id)
     }
   }
 
-  override fun onActivityResult(requestCode: Int, resultCode: Int, resultData: Intent?) {
-    if (requestCode == REQUEST_SELECT_PARAMETER && resultCode == RESULT_OK) {
-      if (resultData != null) {
-        val path = this.getPathOfMediaUri(resultData.data)
-        findViewById<EditText>(R.id.setup_source_parameter).setText(path)
-        return
-      }
-    }
-    super.onActivityResult(requestCode, resultCode, resultData)
+  private fun selectedDistro(): Distro {
+    val checkedId = distroGroup.checkedRadioButtonId
+    val button = if (checkedId != View.NO_ID) distroGroup.findViewById<RadioButton>(checkedId) else null
+    return button?.tag as? Distro ?: Distro.DEFAULT
   }
 
-  private fun doPrepareSetup() {
-    val id = findViewById<RadioGroup>(R.id.setup_method_group).checkedRadioButtonId
-    val editor = findViewById<EditText>(R.id.setup_source_parameter)
-    setupParameter = editor.text.toString()
-    if (setupParameterUri == null) {
-      when (id) {
-        R.id.setup_method_backup,
-        R.id.setup_method_local -> {
-          SetupHelper.makeErrorDialog(this, R.string.setup_error_parameter_null).show()
-          return
-        }
-      }
+  private fun startInstall() {
+    if (installing) {
+      return
     }
+    val distro = selectedDistro()
+    NeoPreference.setProotDistro(distro.id)
 
-    val dialog = SetupHelper.makeProgressDialog(this, getString(R.string.setup_preparing))
-    dialog.show()
+    installing = true
+    setInputsEnabled(false)
 
-    Thread {
-      val errorMessage = validateParameter(id, setupParameter)
-
-      runOnUiThread {
-        dialog.dismiss()
-        editor.error = errorMessage
-        if (errorMessage != null) {
-          SetupHelper.makeErrorDialog(this, errorMessage).show()
-          return@runOnUiThread
-        }
-
-        val connection = createSourceConnection(id, setupParameter, setupParameterUri)
-        showConfirmDialog(connection)
-      }
-    }.start()
-  }
-
-  private fun doSelectParameter() {
-    val id = findViewById<RadioGroup>(R.id.setup_method_group).checkedRadioButtonId
-    when (id) {
-      R.id.setup_method_backup,
-      R.id.setup_method_local -> {
-        val intent = Intent(Intent.ACTION_GET_CONTENT)
-        intent.type = "*/*"
-        try {
-          startActivityForResult(
-            Intent.createChooser(intent, getString(R.string.setup_local)),
-            REQUEST_SELECT_PARAMETER
-          )
-        } catch (ignore: ActivityNotFoundException) {
-          Toast.makeText(this, R.string.no_file_picker, Toast.LENGTH_SHORT).show()
-        }
-      }
-
-      R.id.setup_method_online -> {
-        val view = LayoutInflater.from(this).inflate(R.layout.dialog_edit_text, null, false)
-        view.findViewById<TextView>(R.id.dialog_edit_text_info).text = getString(R.string.input_new_source_url)
-
-        val edit = view.findViewById<EditText>(R.id.dialog_edit_text_editor)
-
-        AlertDialog.Builder(this)
-          .setTitle(R.string.new_source)
-          .setView(view)
-          .setPositiveButton(android.R.string.yes) { _, _ ->
-            val newURL = edit.text.toString()
-            val parameterEditor = findViewById<EditText>(R.id.setup_source_parameter)
-            parameterEditor.setText(newURL)
-          }
-          .setNegativeButton(android.R.string.no, null)
-          .show()
-      }
-    }
-  }
-
-  private fun createSourceConnection(id: Int, parameter: String, parameterUri: Uri?): SourceConnection {
-    return when (id) {
-      R.id.setup_method_local -> LocalFileConnection(this, parameterUri!!)
-      R.id.setup_method_online -> NetworkConnection(parameter)
-      R.id.setup_method_backup -> BackupFileConnection(this, parameterUri!!)
-      else -> throw IllegalArgumentException("Unexpected setup method!")
-    }
-  }
-
-  private fun validateParameter(id: Int, parameter: String): String? {
-    return when (id) {
-      R.id.setup_method_online -> try {
-        java.net.URI.create(parameter)
-        null
-      } catch (e: IllegalArgumentException) {
-        getString(R.string.setup_error_invalid_url)
-      }
-      R.id.setup_method_local,
-      R.id.setup_method_backup -> if (File(parameter).exists()) null else getString(R.string.setup_error_file_not_found)
-      else -> null
-    }
-  }
-
-  private fun setDefaultValue(parameterEditor: EditText, id: Int) {
-    setupParameter = when (id) {
-      R.id.setup_method_online -> NeoTermPath.DEFAULT_MAIN_PACKAGE_SOURCE
-      else -> ""
-    }
-    parameterEditor.setText(setupParameter)
-  }
-
-  private fun showConfirmDialog(connection: SourceConnection) {
-    val needSetup = SetupHelper.needSetup()
-    val titleId = if (needSetup) R.string.setup_confirm else R.string.setup_reset_confirm
-    val messageId = if (needSetup) R.string.setup_confirm_text else R.string.setup_reset_confirm_text
-
-    AlertDialog.Builder(this)
-      .setTitle(titleId)
-      .setMessage(messageId)
-      .setPositiveButton(android.R.string.yes) { _, _ ->
-        doSetup(connection)
-      }
-      .setNegativeButton(android.R.string.no, null)
-      .show()
-  }
-
-  private fun doSetup(connection: SourceConnection) {
-    if (NeoPreference.isProotEnabled()) {
-      // Proot módban a disztró-rootfs-t és a proot binárist töltjük le; a
-      // forrás (online) URL-t base-URL-ként továbbadjuk, egyébként a default.
-      val baseUrl = (connection as? NetworkConnection)?.sourceUrl
-        ?: NeoTermPath.DEFAULT_PROOT_SOURCE
-      SetupHelper.setupProot(this, this, baseUrl)
-    } else {
-      SetupHelper.setup(this, connection, this)
-    }
+    // A SetupHelper egy folyamatjelző dialógust mutat, és a háttérszálon
+    // letölti + kibontja a kiválasztott disztró rootfs-ét a release-ekből.
+    SetupHelper.setupProot(this, this, NeoTermPath.DEFAULT_PROOT_SOURCE, distro)
   }
 
   override fun onResult(error: Exception?) {
+    installing = false
     if (error == null) {
       setResult(RESULT_OK)
-      // Proot módban a csomagkezelés a guest disztrón belül történik (apt/apk/
-      // pacman), így a legacy apt-szinkron lépéseket kihagyjuk.
-      if (!NeoPreference.isProotEnabled()) {
-        SourceHelper.syncSource()
-        executeAptUpdate()
-      } else {
+      finish()
+      return
+    }
+
+    setInputsEnabled(true)
+    AlertDialog.Builder(this)
+      .setTitle(R.string.error)
+      .setMessage(error.toString())
+      .setNeutralButton(R.string.show_help) { _, _ -> App.get().openHelpLink() }
+      .setNegativeButton(R.string.use_system_shell) { _, _ ->
+        setResult(RESULT_CANCELED)
         finish()
       }
+      .setPositiveButton(android.R.string.ok, null)
+      .show()
+  }
 
-    } else {
-      AlertDialog.Builder(this)
-        .setTitle(R.string.error)
-        .setMessage(error.toString())
-        .setNegativeButton(R.string.use_system_shell) { _, _ ->
-          setResult(RESULT_CANCELED)
-          finish()
-        }
-        .setNeutralButton(R.string.show_help) { _, _ ->
-          App.get().openHelpLink()
-        }
-        .setPositiveButton(android.R.string.yes, null)
-        .show()
+  override fun onBackPressed() {
+    if (installing) {
+      return
+    }
+    // Kilépés setup nélkül → a hívó NeoTermActivity rendszer-shellre vált.
+    setResult(RESULT_CANCELED)
+    super.onBackPressed()
+  }
+
+  private fun setInputsEnabled(enabled: Boolean) {
+    installButton.isEnabled = enabled
+    for (i in 0 until distroGroup.childCount) {
+      distroGroup.getChildAt(i).isEnabled = enabled
     }
   }
 
-  private fun executeAptUpdate() = runApt("update") {
-    it.onSuccess { executeAptUpgrade() }
-  }
-
-  private fun executeAptUpgrade() = runApt("upgrade", "-y") {
-    it.onSuccess { finish() }
-  }
+  private fun dp(value: Int): Int =
+    (value * resources.displayMetrics.density).toInt()
 }
