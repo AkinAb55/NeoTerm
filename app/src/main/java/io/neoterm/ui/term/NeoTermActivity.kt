@@ -743,12 +743,17 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   @Subscribe(threadMode = ThreadMode.MAIN)
   fun onTabCloseEvent(tabCloseEvent: TabCloseEvent) {
     val tab = tabCloseEvent.termTab
-    // Only reveal the switcher when closing the LAST tab (so the add button is
-    // available). Otherwise remove instantly with the switcher hidden -> the
-    // layout just swaps to the neighbour with no close animation.
+
+    // Closing the last tab exits the app. Remove the tab first so its session
+    // is cleaned up (onTabRemoved -> SessionRemover), then finish the activity.
     if (tabSwitcher.count <= 1) {
-      toggleSwitcher(showSwitcher = true, easterEgg = false)
+      tabSwitcher.removeTab(tab)
+      finish()
+      return
     }
+
+    // Otherwise remove instantly with the switcher hidden -> the layout just
+    // swaps to the neighbour with no close animation.
     tabSwitcher.removeTab(tab)
 
     if (tabSwitcher.count > 1) {
