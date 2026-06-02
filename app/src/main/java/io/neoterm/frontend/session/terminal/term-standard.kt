@@ -57,11 +57,8 @@ class TermViewClient(val context: Context) : TerminalViewClient {
   }
 
   override fun copyModeChanged(copyMode: Boolean) {
-    // Hide the soft keyboard while selecting text so it doesn't cover the
-    // selection handles / the area being selected.
-    if (copyMode) {
-      termSessionData?.termUI?.requireHideIme()
-    }
+    // Keep the soft keyboard visible while selecting text (the user asked for
+    // it to stay up in selection mode), so do nothing here.
   }
 
   override fun onKeyDown(keyCode: Int, e: KeyEvent?, session: TerminalSession?): Boolean {
