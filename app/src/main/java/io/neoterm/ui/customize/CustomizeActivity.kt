@@ -104,6 +104,10 @@ class CustomizeActivity : BaseCustomizeActivity() {
 
   override fun onResume() {
     super.onResume()
+    // Re-scan so schemes/fonts added elsewhere (the new-scheme editor or an
+    // import) appear without leaving and reopening the screen.
+    ComponentManager.getComponent<ColorSchemeComponent>().reloadColorSchemes()
+    ComponentManager.getComponent<FontComponent>().reloadFonts()
     setupSpinners()
   }
 
@@ -127,11 +131,15 @@ class CustomizeActivity : BaseCustomizeActivity() {
 
   private fun installColor(selected: String) {
     installFileTo(selected, NeoTermPath.COLORS_PATH)
+    // Re-scan the colors directory so the freshly imported scheme shows up.
+    ComponentManager.getComponent<ColorSchemeComponent>().reloadColorSchemes()
     setupSpinners()
   }
 
   private fun installFont(selected: String) {
     installFileTo(selected, NeoTermPath.FONT_PATH)
+    // Re-scan the fonts directory so the freshly imported font shows up.
+    ComponentManager.getComponent<FontComponent>().reloadFonts()
     setupSpinners()
   }
 
