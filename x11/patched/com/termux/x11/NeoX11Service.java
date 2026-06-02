@@ -1,5 +1,6 @@
 package com.termux.x11;
 
+import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -8,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 import android.system.Os;
 import android.util.Log;
 
@@ -37,17 +39,26 @@ public class NeoX11Service extends Service {
     private static final int NOTI_ID = 0x4011;
     private static boolean started = false;
 
+    @SuppressWarnings("FieldCanBeLocal")
+    private PowerManager.WakeLock wakeLock = null;
+
     @Override
     public void onCreate() {
         super.onCreate();
         startForeground(NOTI_ID, buildNotification());
     }
 
+    @SuppressLint("WakelockTimeout")
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (!started) {
             started = true;
             try {
+                // Keep the CPU awake so the X server keeps serving even with the
+                // screen off (on by default, matching the terminal).
+                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NeoTerm:x11");
+                wakeLock.acquire();
                 if (intent != null) {
                     String tmp = intent.getStringExtra(EXTRA_TMPDIR);
                     String xkb = intent.getStringExtra(EXTRA_XKB);
@@ -95,6 +106,9 @@ public class NeoX11Service extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        if (wakeLock != null && wakeLock.isHeld()) {
+            try { wakeLock.release(); } catch (Throwable ignored) {}
+        }
         // This is a dedicated process; kill it so the native X server actually
         // exits (its threads would otherwise keep running until the process dies).
         android.os.Process.killProcess(android.os.Process.myPid());

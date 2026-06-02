@@ -43,6 +43,9 @@ class NeoTermService : Service() {
     super.onCreate()
     createNotificationChannel()
     startForeground(NOTIFICATION_ID, createNotification())
+    // Wake lock on by default (keep the CPU running). Don't pop the battery-
+    // optimization dialog at startup — that's only prompted on a manual acquire.
+    acquireLock(promptBatteryOpt = false)
   }
 
   override fun onBind(intent: Intent): IBinder? {
@@ -58,7 +61,7 @@ class NeoTermService : Service() {
         stopSelf()
       }
 
-      ACTION_ACQUIRE_LOCK -> acquireLock()
+      ACTION_ACQUIRE_LOCK -> acquireLock(promptBatteryOpt = true)
 
       ACTION_RELEASE_LOCK -> releaseLock()
     }
@@ -188,7 +191,7 @@ class NeoTermService : Service() {
   }
 
   @SuppressLint("WakelockTimeout")
-  private fun acquireLock() {
+  private fun acquireLock(promptBatteryOpt: Boolean = true) {
     if (mWakeLock == null) {
       val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
       mWakeLock = pm.newWakeLock(
@@ -203,8 +206,8 @@ class NeoTermService : Service() {
 
       // A PARTIAL_WAKE_LOCK only reliably keeps the CPU running with the screen
       // off if the app is exempt from Doze/battery optimization, so prompt the
-      // user to allow it when they take the lock.
-      requestDisableBatteryOptimization(pm)
+      // user to allow it — but only on an explicit acquire, not at startup.
+      if (promptBatteryOpt) requestDisableBatteryOptimization(pm)
 
       updateNotification()
     }

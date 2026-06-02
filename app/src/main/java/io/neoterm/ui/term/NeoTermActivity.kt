@@ -84,6 +84,9 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
 
+    // Keep the screen on while the terminal is in front (on by default).
+    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
     val fullscreen = NeoPreference.isFullScreenEnabled()
     if (fullscreen) {
       window.setFlags(
