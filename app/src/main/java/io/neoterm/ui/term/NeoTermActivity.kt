@@ -249,6 +249,10 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         startX11()
         true
       }
+      R.id.menu_item_x11_stop -> {
+        stopX11()
+        true
+      }
       R.id.menu_item_x11_install_env -> {
         installX11Environment()
         true
@@ -264,6 +268,12 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   private fun startX11() {
     X11Manager.startServer(this)
     Toast.makeText(this, R.string.x11_started_hint, Toast.LENGTH_LONG).show()
+  }
+
+  /** Stop the embedded X11 server and close its window. */
+  private fun stopX11() {
+    X11Manager.stopServer(this)
+    Toast.makeText(this, R.string.x11_stopped_hint, Toast.LENGTH_SHORT).show()
   }
 
   /** Install the X11 client environment (xterm + openbox + fonts) into the distro. */

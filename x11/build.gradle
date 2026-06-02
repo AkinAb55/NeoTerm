@@ -42,7 +42,10 @@ android {
       // patched overlay (see prepareX11Sources) laid on top, plus generated Prefs.
       java.srcDirs = ["$projectDir/build/x11-java", "$projectDir/build/generated/java"]
       aidl.srcDirs = ["$upstream/aidl"]
-      res.srcDirs = ["$upstream/res"]
+      // NeoTerm res overlay (res-overlay) adds a dedicated fullscreen theme for
+      // MainActivity; upstream's @style/AppTheme collides with the app's, so the
+      // app's titlebar theme would otherwise win the merge.
+      res.srcDirs = ["$upstream/res", "$projectDir/res-overlay"]
     }
   }
 

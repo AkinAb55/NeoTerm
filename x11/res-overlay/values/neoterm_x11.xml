@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Dedicated theme for the embedded X11 MainActivity. Mirrors upstream's
+      AppTheme (Theme.AppCompat.DayNight.NoActionBar, translucent bars) but with
+      a unique name, so NeoTerm's app-level @style/AppTheme doesn't win the
+      resource merge and give the X11 window a titlebar.
+    -->
+    <style name="NeoX11Theme" parent="@style/Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+    </style>
+</resources>

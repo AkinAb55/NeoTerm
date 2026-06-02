@@ -3,6 +3,7 @@ package io.neoterm.utils
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import com.termux.x11.MainActivity
 import com.termux.x11.NeoX11Service
 import io.neoterm.component.config.NeoTermPath
 import io.neoterm.setup.proot.ProotManager
@@ -82,5 +83,19 @@ object X11Manager {
       NLog.e("X11Manager", "Failed to start X server: ${it.localizedMessage}")
     }
     launchDisplay(context)
+  }
+
+  /**
+   * Stop the X server: close the GUI window and stop the :x11server service,
+   * whose onDestroy kills that process so the native server actually exits.
+   */
+  fun stopServer(context: Context) {
+    runCatching {
+      MainActivity.getInstance()?.finishAndRemoveTask()
+      context.stopService(Intent(context, NeoX11Service::class.java))
+      NLog.e("X11Manager", "Requested X server stop")
+    }.onFailure {
+      NLog.e("X11Manager", "Failed to stop X server: ${it.localizedMessage}")
+    }
   }
 }

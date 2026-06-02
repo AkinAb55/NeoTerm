@@ -44,6 +44,10 @@
         android:title="@string/x11_start"
         app:showAsAction="never"/>
       <item
+        android:id="@+id/menu_item_x11_stop"
+        android:title="@string/x11_stop"
+        app:showAsAction="never"/>
+      <item
         android:id="@+id/menu_item_x11_install_env"
         android:title="@string/x11_install_env"
         app:showAsAction="never"/>

@@ -18,6 +18,7 @@
     <application>
         <activity
             android:name=".MainActivity"
+            android:theme="@style/NeoX11Theme"
             android:taskAffinity=".MainActivity"
             android:launchMode="singleInstance"
             android:supportsPictureInPicture="true"

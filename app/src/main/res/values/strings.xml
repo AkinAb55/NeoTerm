@@ -165,6 +165,8 @@
   <string name="update_open_settings">Open settings</string>
   <string name="x11_menu">X11 (GUI)</string>
   <string name="x11_start">Start X11</string>
+  <string name="x11_stop">Stop X11</string>
+  <string name="x11_stopped_hint">X11 server stopped.</string>
   <string name="x11_install_env">Install X11 environment</string>
   <string name="x11_install_server_title">Install Termux:X11</string>
   <string name="x11_install_server_message">The native X11 server is needed to show Linux GUI apps. Download and install it now?</string>

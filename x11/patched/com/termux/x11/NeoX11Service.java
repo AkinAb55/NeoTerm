@@ -92,6 +92,14 @@ public class NeoX11Service extends Service {
                 .build();
     }
 
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        // This is a dedicated process; kill it so the native X server actually
+        // exits (its threads would otherwise keep running until the process dies).
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {
