@@ -212,7 +212,7 @@ class ProotInstaller(
                 // proot különben nem tudja exec-elni őket (a bináris ELF-eket
                 // mmap-eli, így azok bit nélkül is futnak, a scriptek viszont
                 // megkövetelik a futtatási bitet → "Permission denied").
-                if (read >= 2 && buffer[0] == '#'.code.toByte() && buffer[1] == '!'.code.toByte()) {
+                if (read >= 2 && buffer[0] == '#'.toByte() && buffer[1] == '!'.toByte()) {
                   shebang = true
                 }
                 firstChunk = false
@@ -308,7 +308,7 @@ class ProotInstaller(
   /** Igaz, ha a fájl shebanggel (`#!`) kezdődik, azaz futtatható script. */
   private fun isScript(file: File): Boolean {
     return runCatching {
-      file.inputStream().use { it.read() == '#'.code && it.read() == '!'.code }
+      file.inputStream().use { it.read() == '#'.toInt() && it.read() == '!'.toInt() }
     }.getOrDefault(false)
   }
 
