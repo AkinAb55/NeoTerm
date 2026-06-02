@@ -759,25 +759,30 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       return
     }
 
-    // Otherwise remove instantly with the switcher hidden -> the layout just
-    // swaps to the neighbour with no close animation.
-    tabSwitcher.removeTab(tab)
-
-    if (tabSwitcher.count > 1) {
-      var index = tabSwitcher.indexOf(tab)
-      if (NeoPreference.isNextTabEnabled()) {
-        // 关闭当前窗口后，向下一个窗口切换
-        if (--index < 0) index = tabSwitcher.count - 1
-      } else {
-        // 关闭当前窗口后，向上一个窗口切换
-        if (++index >= tabSwitcher.count) index = 0
-      }
-      val target = tabSwitcher.getTab(index)
-      // Defer the selection so the removal's layout settles first; selecting
-      // in the same frame can leave the new terminal blank until the next
-      // layout pass. The decorator's onShowTab also forces a redraw.
-      tabSwitcher.post { switchToSession(target) }
+    // Work out which neighbour to switch to *before* removing the closing tab.
+    var index = tabSwitcher.indexOf(tab)
+    if (NeoPreference.isNextTabEnabled()) {
+      // 关闭当前窗口后，向下一个窗口切换
+      if (--index < 0) index = tabSwitcher.count - 1
+    } else {
+      // 关闭当前窗口后，向上一个窗口切换
+      if (++index >= tabSwitcher.count) index = 0
     }
+    val target = tabSwitcher.getTab(index)
+
+    // Select the neighbour first, then remove the closing tab. With the
+    // switcher hidden, mrapp's removeTab only re-inflates the auto-selected
+    // neighbour when its index differs from the previously selected index.
+    // Closing the front tab (index 0, the common case) keeps the selected
+    // index at 0, so the neighbour is never inflated and the terminal stays
+    // blank until the next layout pass (which is why backgrounding/foreground
+    // or opening the switcher "fixed" it). Selecting the neighbour up front
+    // forces its view to inflate and show; the subsequent removeTab then just
+    // drops the now-unselected closing tab.
+    if (target !== tab) {
+      switchToSession(target)
+    }
+    tabSwitcher.removeTab(tab)
   }
 
   @Suppress("unused", "UNUSED_PARAMETER")
