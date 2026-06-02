@@ -20,9 +20,9 @@ on:
         type: string
         default: "ubuntu alpine kali arch"
       release_tag:
-        description: "GitHub Release tag"
+        description: "GitHub Release tag (üresen hagyva a versionName-ből generálódik: v<versionName>)"
         type: string
-        default: "proot-latest"
+        default: ""
       publish_release:
         description: "GitHub Release közzététele (APK + proot + rootfs)"
         type: boolean
@@ -204,11 +204,28 @@ jobs:
           echo "── release assets ──"
           ls -lh assets
 
+      - name: Determine release tag
+        id: tag
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            # Auto-generate the tag from the app versionName (e.g. v2.0.5) so the
+            # in-app updater can compare versions.
+            VERSION="$(sed -nE 's/.*versionName[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle | head -n1)"
+            if [ -z "$VERSION" ]; then
+              echo "Could not read versionName from app/build.gradle" >&2
+              exit 1
+            fi
+            TAG="v${VERSION}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: ${TAG}"
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ inputs.release_tag }}"
+          TAG="${{ steps.tag.outputs.tag }}"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --title "NeoTerm proot ($TAG)" \
