@@ -57,5 +57,13 @@
                 <action android:name="com.termux.x11.CHANGE_PREFERENCE" />
             </intent-filter>
         </receiver>
+
+        <!-- Hosts the embedded X server in its OWN process (mirrors Termux:X11's
+             dedicated server process) so the GUI/app main thread stays free and
+             the server survives phantom-process killing. -->
+        <service
+            android:name=".NeoX11Service"
+            android:process=":x11server"
+            android:exported="false" />
     </application>
 </manifest>

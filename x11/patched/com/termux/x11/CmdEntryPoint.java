@@ -65,33 +65,27 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     }
 
     /**
-     * NeoTerm: start the X server inside the host app's process (single-APK
-     * embedding). libXlorie.so is resolved from nativeLibraryDir; the broadcast
-     * is delivered to {@code appContext}'s package, where the embedded
-     * MainActivity is listening.
-     *
-     * The server runs on its OWN thread+Looper: start() registers an
-     * AChoreographer frame callback (GL rendering at the display refresh rate)
-     * on the calling thread's looper, so running it on the host's main thread
-     * would freeze the UI. A dedicated looper keeps that work off the main thread.
+     * NeoTerm: start the X server inside the host process (single-APK embedding).
+     * Called from NeoX11Service, which runs in its OWN process (android:process)
+     * so this mirrors upstream's dedicated server process: the server gets a
+     * process whose main thread does only X11, and the GUI MainActivity connects
+     * cross-process over the ACTION_START binder. libXlorie.so is resolved from
+     * nativeLibraryDir; the broadcast targets {@code appContext}'s package.
      */
     @Keep
     public static void startInProcess(Context appContext, String[] args) {
         inProcess = true;
         if (appContext != null)
             ctx = appContext.getApplicationContext();
-        Thread t = new Thread(() -> {
-            Looper.prepare();
+        // Construct on this process's main looper (the server process has no UI),
+        // so AChoreographer's frame callbacks are serviced by the main loop.
+        handler.post(() -> {
             try {
                 new CmdEntryPoint(args);
-            } catch (Throwable e) {
-                Log.e("CmdEntryPoint", "in-process X server failed to start", e);
-                return;
+            } catch (Throwable t) {
+                Log.e("CmdEntryPoint", "in-process X server failed to start", t);
             }
-            Looper.loop();
-        }, "x11-server");
-        t.setDaemon(true);
-        t.start();
+        });
     }
 
     CmdEntryPoint(String[] args) {

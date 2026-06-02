@@ -2,26 +2,24 @@ package io.neoterm.utils
 
 import android.content.Context
 import android.content.Intent
-import android.os.Handler
-import android.os.Looper
-import android.system.Os
-import com.termux.x11.CmdEntryPoint
+import android.os.Build
+import com.termux.x11.NeoX11Service
 import io.neoterm.component.config.NeoTermPath
 import io.neoterm.setup.proot.ProotManager
 import java.io.File
 
 /**
- * Drives the embedded Termux:X11 native X server, which is built directly into
- * the NeoTerm APK (the :x11 module — single APK, no separate package).
+ * Drives the embedded Termux:X11 native X server, built into the NeoTerm APK
+ * (the :x11 module — single APK, no separate package).
  *
- * The X server runs **in NeoTerm's own process** (via [CmdEntryPoint.startInProcess]),
- * not as a child app_process: Android 12+ kills app-spawned child processes as
- * "phantom processes" (SIGKILL) once the app backgrounds, which killed the X
- * server instantly. In-process, the server is protected by NeoTerm's foreground
- * service and libXlorie.so loads normally from nativeLibraryDir.
+ * The X server runs in its OWN process via [NeoX11Service]
+ * (android:process=":x11server"), mirroring how Termux:X11 runs its server in a
+ * dedicated process. This keeps NeoTerm's main thread free (no UI freeze) and,
+ * being an AMS-managed foreground service rather than a forked child process,
+ * survives Android 12+ phantom-process killing.
  *
- * [launchDisplay] opens `com.termux.x11.MainActivity` (the LorieView surface),
- * which lives in the same process and connects to the server over the local
+ * [launchDisplay] opens `com.termux.x11.MainActivity` (the LorieView surface) in
+ * the normal app process; it connects to the server cross-process over the
  * ACTION_START binder. proot sessions already export DISPLAY=:0.
  *
  * @author kiva
@@ -45,54 +43,44 @@ object X11Manager {
   }
 
   /**
-   * Start the X server in-process on display :0, then open the display. The
-   * server creates the abstract X socket that proot apps reach via DISPLAY=:0,
-   * and broadcasts ACTION_START to our own package so the embedded MainActivity
-   * connects. Server bring-up must happen on the main thread.
+   * Start the X server (in its own process) on display :0, then open the
+   * display. The server creates the abstract X socket that proot apps reach via
+   * DISPLAY=:0, and broadcasts ACTION_START to our package so MainActivity
+   * connects.
+   *
+   * The native server reads its config from the environment, which is
+   * per-process, so we compute the values here (in the app, where the distro
+   * paths are known) and hand them to the service to apply in the server
+   * process:
+   *  - TMPDIR: the server creates its socket at $TMPDIR/.X11-unix/X0; we point
+   *    it at the dir proot binds to the guest's /tmp/.X11-unix (see ProotManager).
+   *  - XKB_CONFIG_ROOT: keyboard config data the server requires, from the
+   *    selected distro's rootfs (/usr/share/X11/xkb).
    */
   fun startServer(context: Context) {
-    val app = context.applicationContext
-    prepareServerEnv()
-    // Open the GUI first; MainActivity registers the ACTION_START receiver, and
-    // the server re-broadcasts every second until connected, so order is safe.
-    launchDisplay(context)
-    Handler(Looper.getMainLooper()).post {
-      runCatching {
-        System.loadLibrary("Xlorie")
-        CmdEntryPoint.startInProcess(app, arrayOf(":0"))
-        NLog.e("X11Manager", "In-process X server requested on :0")
-      }.onFailure {
-        NLog.e("X11Manager", "Failed to start in-process X server: ${it.localizedMessage}")
-      }
-    }
-  }
-
-  /**
-   * Set up the process env the native X server reads (getenv):
-   *  - TMPDIR: the server creates its unix socket at $TMPDIR/.X11-unix/X0. We
-   *    point it at the dir proot binds to the guest's /tmp/.X11-unix (see
-   *    ProotManager), so DISPLAY=:0 inside the distro reaches the same socket.
-   *  - XKB_CONFIG_ROOT: the keyboard config data (/usr/share/X11/xkb) the server
-   *    requires to start — it lives in the selected distro's rootfs once the X11
-   *    environment (xkb-data / xkeyboard-config) is installed.
-   */
-  private fun prepareServerEnv() {
     runCatching {
       val tmp = File(NeoTermPath.PROOT_ROOT_PATH, "x11")
       File(tmp, ".X11-unix").mkdirs()
-      Os.setenv("TMPDIR", tmp.absolutePath, true)
-
       val xkb = File(ProotManager.selectedDistro().rootfsPath(), "usr/share/X11/xkb")
-      if (xkb.exists()) {
-        Os.setenv("XKB_CONFIG_ROOT", xkb.absolutePath, true)
-      } else {
+      if (!xkb.exists()) {
         NLog.e(
           "X11Manager",
           "XKB data missing at ${xkb.absolutePath} — run 'Install X11 environment' first"
         )
       }
+
+      val intent = Intent(context, NeoX11Service::class.java)
+        .putExtra(NeoX11Service.EXTRA_TMPDIR, tmp.absolutePath)
+        .putExtra(NeoX11Service.EXTRA_XKB, xkb.absolutePath)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        context.startForegroundService(intent)
+      } else {
+        context.startService(intent)
+      }
+      NLog.e("X11Manager", "Requested X server (:x11server) on :0")
     }.onFailure {
-      NLog.e("X11Manager", "Failed to prepare X11 env: ${it.localizedMessage}")
+      NLog.e("X11Manager", "Failed to start X server: ${it.localizedMessage}")
     }
+    launchDisplay(context)
   }
 }
