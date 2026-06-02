@@ -250,15 +250,17 @@ class TermViewClient(val context: Context) : TerminalViewClient {
   }
 
   fun updateExtraKeys(title: String?, force: Boolean = false) {
-    val extraKeysView = termSessionData?.extraKeysView
+    val extraKeysView = termSessionData?.extraKeysView ?: return
 
-    if (extraKeysView == null || title == null || title.isEmpty()) {
+    // Always apply the show/hide setting first, even before the shell has set a
+    // title (e.g. a bare system shell), so the extra-keys visibility matches the
+    // preference for every session, not just ones that report a title.
+    val enabled = updateExtraKeysVisibility()
+    if (!enabled || title == null || title.isEmpty()) {
       return
     }
 
-    if ((lastTitle != title || force)
-      && updateExtraKeysVisibility()
-    ) {
+    if (lastTitle != title || force) {
       removeExtraKeys()
       ComponentManager.getComponent<ExtraKeyComponent>().showShortcutKeys(title, extraKeysView)
       extraKeysView.updateButtons()
