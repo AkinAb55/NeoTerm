@@ -121,6 +121,21 @@ jobs:
           chmod +x app/src/main/jniLibs/arm64-v8a/libproot.so
           ls -l app/src/main/jniLibs/arm64-v8a/
 
+      - name: Bump version automatically (per build)
+        run: |
+          # Append the workflow run number to versionName and add it to
+          # versionCode, so every build produces a strictly newer version that
+          # the in-app updater will pick up. Patched in CI only (not committed).
+          RUN="${{ github.run_number }}"
+          BASE_NAME="$(sed -nE 's/.*versionName[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle | head -n1)"
+          BASE_CODE="$(sed -nE 's/.*versionCode[[:space:]]+([0-9]+).*/\1/p' app/build.gradle | head -n1)"
+          NEW_NAME="${BASE_NAME}.${RUN}"
+          NEW_CODE="$(( BASE_CODE + RUN ))"
+          sed -i -E "s/(versionName[[:space:]]*\")[^\"]+(\")/\1${NEW_NAME}\2/" app/build.gradle
+          sed -i -E "s/(versionCode[[:space:]]+)[0-9]+/\1${NEW_CODE}/" app/build.gradle
+          echo "App version: ${NEW_NAME} (versionCode ${NEW_CODE})"
+          grep -E "versionName|versionCode" app/build.gradle
+
       - name: Gradle assemble
         run: |
           chmod +x ./gradlew
@@ -209,14 +224,13 @@ jobs:
         run: |
           TAG="${{ inputs.release_tag }}"
           if [ -z "$TAG" ]; then
-            # Auto-generate the tag from the app versionName (e.g. v2.0.5) so the
-            # in-app updater can compare versions.
+            # Match the auto-bumped APK version: <versionName>.<run_number>.
             VERSION="$(sed -nE 's/.*versionName[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle | head -n1)"
             if [ -z "$VERSION" ]; then
               echo "Could not read versionName from app/build.gradle" >&2
               exit 1
             fi
-            TAG="v${VERSION}"
+            TAG="v${VERSION}.${{ github.run_number }}"
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Release tag: ${TAG}"
