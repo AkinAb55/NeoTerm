@@ -488,6 +488,22 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
           }
         }
       }
+
+      getString(R.string.key_general_bell) -> {
+        // Apply the bell toggle to already-open sessions, not just new ones.
+        val enabled = NeoPreference.isBellEnabled()
+        forEachTab<TermTab> { tab ->
+          (tab.termData.termSession as? ShellTermSession)?.shellProfile?.enableBell = enabled
+        }
+      }
+
+      getString(R.string.key_general_vibrate) -> {
+        // Apply the vibrate toggle to already-open sessions, not just new ones.
+        val enabled = NeoPreference.isVibrateEnabled()
+        forEachTab<TermTab> { tab ->
+          (tab.termData.termSession as? ShellTermSession)?.shellProfile?.enableVibrate = enabled
+        }
+      }
     }
   }
 

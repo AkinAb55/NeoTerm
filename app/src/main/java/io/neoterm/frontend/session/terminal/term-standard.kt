@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.media.AudioManager
 import android.media.SoundPool
+import android.os.Build
+import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
 import android.view.InputDevice
@@ -345,6 +347,8 @@ class BellController {
 
   private var bellId: Int = 0
   private var soundPool: SoundPool? = null
+  private var soundLoaded = false
+  private var pendingBell = false
   private var lastBellTime = 0L
 
   fun bellOrVibrate(context: Context, session: ShellTermSession) {
@@ -356,15 +360,36 @@ class BellController {
 
     if (session.shellProfile.enableBell) {
       if (soundPool == null) {
+        // Use the application context so the SoundPool doesn't hold the Activity.
         soundPool = SoundPool.Builder().setMaxStreams(1).build()
-        bellId = soundPool!!.load(context, R.raw.bell, 1)
+        soundPool!!.setOnLoadCompleteListener { pool, _, status ->
+          soundLoaded = status == 0
+          // The sample loads asynchronously; if a bell was requested before it
+          // finished, play it now so the very first bell isn't silently dropped.
+          if (soundLoaded && pendingBell) {
+            pendingBell = false
+            pool.play(bellId, 1f, 1f, 0, 0, 1f)
+          }
+        }
+        bellId = soundPool!!.load(context.applicationContext, R.raw.bell, 1)
       }
-      soundPool?.play(bellId, 1f, 1f, 0, 0, 1f)
+      if (soundLoaded) {
+        soundPool?.play(bellId, 1f, 1f, 0, 0, 1f)
+      } else {
+        pendingBell = true
+      }
     }
 
     if (session.shellProfile.enableVibrate) {
-      val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-      vibrator.vibrate(100)
+      val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+      if (vibrator != null && vibrator.hasVibrator()) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+          vibrator.vibrate(VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE))
+        } else {
+          @Suppress("DEPRECATION")
+          vibrator.vibrate(100)
+        }
+      }
     }
   }
 }
