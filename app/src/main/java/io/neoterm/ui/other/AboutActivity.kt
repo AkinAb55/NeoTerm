@@ -16,9 +16,11 @@ import de.psdev.licensesdialog.licenses.GnuGeneralPublicLicense30
 import de.psdev.licensesdialog.licenses.MITLicense
 import de.psdev.licensesdialog.model.Notice
 import de.psdev.licensesdialog.model.Notices
+import android.widget.Toast
 import io.neoterm.App
 import io.neoterm.R
 import io.neoterm.utils.TerminalColorTheme
+import io.neoterm.utils.UpdateManager
 
 
 /**
@@ -156,6 +158,18 @@ class AboutActivity : AppCompatActivity() {
         .show()
     }
 
+    findViewById<View>(R.id.about_check_update_view).setOnClickListener {
+      Toast.makeText(this, R.string.update_checking, Toast.LENGTH_SHORT).show()
+      UpdateManager.checkForUpdate { info ->
+        if (isFinishing) return@checkForUpdate
+        if (info == null) {
+          Toast.makeText(this, R.string.update_up_to_date, Toast.LENGTH_SHORT).show()
+        } else {
+          showUpdateDialog(info)
+        }
+      }
+    }
+
     findViewById<View>(R.id.about_reset_app_view).setOnClickListener {
       AlertDialog.Builder(this)
         .setMessage(R.string.reset_app_warning)
@@ -165,6 +179,28 @@ class AboutActivity : AppCompatActivity() {
         .setNegativeButton(android.R.string.no, null)
         .show()
     }
+  }
+
+  private fun showUpdateDialog(info: UpdateManager.UpdateInfo) {
+    AlertDialog.Builder(this)
+      .setTitle(getString(R.string.update_available_title, info.tag))
+      .setMessage(info.notes.ifBlank { getString(R.string.update_available_message) })
+      .setPositiveButton(R.string.update_download_install) { _, _ -> startUpdate(info) }
+      .setNeutralButton(R.string.update_open_releases) { _, _ -> UpdateManager.openReleasesPage(this) }
+      .setNegativeButton(android.R.string.cancel, null)
+      .show()
+  }
+
+  private fun startUpdate(info: UpdateManager.UpdateInfo) {
+    if (!UpdateManager.canInstall(this)) {
+      AlertDialog.Builder(this)
+        .setMessage(R.string.update_need_install_permission)
+        .setPositiveButton(R.string.update_open_settings) { _, _ -> UpdateManager.requestInstallPermission(this) }
+        .setNegativeButton(android.R.string.cancel, null)
+        .show()
+      return
+    }
+    UpdateManager.downloadAndInstall(this, info)
   }
 
   private fun resetApp() {

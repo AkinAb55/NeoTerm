@@ -42,6 +42,7 @@ import io.neoterm.ui.settings.SettingActivity
 import io.neoterm.utils.FullScreenHelper
 import io.neoterm.utils.NeoPermission
 import io.neoterm.utils.RangedInt
+import io.neoterm.utils.UpdateManager
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
@@ -51,6 +52,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   companion object {
     const val KEY_NO_RESTORE = "no_restore"
     const val REQUEST_SETUP = 22313
+    private const val KEY_LAST_UPDATE_CHECK = "last_update_check"
 
     /** Delay before opening the first session after setup, so the rootfs is
      * settled and the content view is laid out (otherwise the terminal opens
@@ -72,6 +74,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   private var serviceConnected = false
   private var permissionsHandled = false
   private var startupProceeded = false
+  private var updateChecked = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -306,6 +309,46 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     }
     // Returning from recents/background: re-raise the keyboard for the terminal.
     raiseKeyboardForSelectedTab()
+    maybeCheckForUpdate()
+  }
+
+  /**
+   * Check GitHub for a newer release once per launch (and at most daily), and
+   * offer to download + install it if one is available.
+   */
+  private fun maybeCheckForUpdate() {
+    if (updateChecked) return
+    updateChecked = true
+    val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+    val now = System.currentTimeMillis()
+    if (now - prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L) < 24 * 60 * 60 * 1000L) {
+      return
+    }
+    UpdateManager.checkForUpdate { info ->
+      if (isFinishing) return@checkForUpdate
+      prefs.edit().putLong(KEY_LAST_UPDATE_CHECK, now).apply()
+      if (info != null && !tabSwitcher.isSwitcherShown) {
+        AlertDialog.Builder(this)
+          .setTitle(getString(R.string.update_available_title, info.tag))
+          .setMessage(info.notes.ifBlank { getString(R.string.update_available_message) })
+          .setPositiveButton(R.string.update_download_install) { _, _ -> startUpdate(info) }
+          .setNeutralButton(R.string.update_open_releases) { _, _ -> UpdateManager.openReleasesPage(this) }
+          .setNegativeButton(android.R.string.cancel, null)
+          .show()
+      }
+    }
+  }
+
+  private fun startUpdate(info: UpdateManager.UpdateInfo) {
+    if (!UpdateManager.canInstall(this)) {
+      AlertDialog.Builder(this)
+        .setMessage(R.string.update_need_install_permission)
+        .setPositiveButton(R.string.update_open_settings) { _, _ -> UpdateManager.requestInstallPermission(this) }
+        .setNegativeButton(android.R.string.cancel, null)
+        .show()
+      return
+    }
+    UpdateManager.downloadAndInstall(this, info)
   }
 
   override fun onStart() {
