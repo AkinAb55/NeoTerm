@@ -144,9 +144,9 @@ needs_exe_wrapper = true
 
 [built-in options]
 c_args = ['-I$PREFIX/include']
-c_link_args = ['-L$PREFIX/lib']
+c_link_args = ['-L$PREFIX/lib', '-Wl,--undefined-version']
 cpp_args = ['-I$PREFIX/include']
-cpp_link_args = ['-L$PREFIX/lib']
+cpp_link_args = ['-L$PREFIX/lib', '-Wl,--undefined-version']
 EOF
 
 meson setup "$WORK/pa-build" "$PA_SRC" \
