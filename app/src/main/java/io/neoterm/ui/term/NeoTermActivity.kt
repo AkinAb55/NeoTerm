@@ -51,6 +51,11 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   companion object {
     const val KEY_NO_RESTORE = "no_restore"
     const val REQUEST_SETUP = 22313
+
+    /** Delay before opening the first session after setup, so the rootfs is
+     * settled and the content view is laid out (otherwise the terminal opens
+     * blank). */
+    private const val FIRST_SESSION_DELAY_MS = 350L
   }
 
   lateinit var tabSwitcher: TabSwitcher
@@ -497,10 +502,16 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     when (requestCode) {
       REQUEST_SETUP -> {
         when (resultCode) {
-          AppCompatActivity.RESULT_OK -> enterMain()
+          // onActivityResult runs before the activity is resumed and the tab
+          // switcher is laid out, so creating the first session right here gives
+          // it a zero-sized view and the terminal stays blank (just the
+          // background). Defer it briefly so the rootfs that was just extracted
+          // is settled and the content view is measured before the shell opens.
+          AppCompatActivity.RESULT_OK ->
+            tabSwitcher.postDelayed({ enterMain() }, FIRST_SESSION_DELAY_MS)
           AppCompatActivity.RESULT_CANCELED -> {
             setSystemShellMode(true)
-            forceAddSystemSession()
+            tabSwitcher.postDelayed({ forceAddSystemSession() }, FIRST_SESSION_DELAY_MS)
           }
         }
       }
