@@ -310,10 +310,11 @@ open class ShellTermSession private constructor(
       ) {
         // Honor the user's login-shell preference: if they kept the default
         // ("bash"), use the distro's default shell (e.g. ash on Alpine);
-        // otherwise run /bin/<name> (they presumably installed it).
+        // otherwise resolve the chosen shell's real path inside the rootfs
+        // (e.g. /usr/bin/zsh), falling back to /bin/<name>.
         val loginName = NeoPreference.getLoginShellName()
         val guestShell = if (loginName.isNotEmpty() && loginName != DefaultValues.loginShell)
-          "/bin/$loginName" else null
+          ProotManager.findShell(loginName) ?: "/bin/$loginName" else null
         val launch = ProotManager.buildLaunch(loginShell = guestShell)
         return ShellTermSession(
           launch.executable, launch.hostCwd, launch.args, launch.env,

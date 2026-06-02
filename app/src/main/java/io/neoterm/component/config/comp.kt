@@ -13,6 +13,7 @@ import io.neoterm.R
 import io.neoterm.backend.TerminalSession
 import io.neoterm.component.NeoComponent
 import io.neoterm.services.NeoTermService
+import io.neoterm.setup.proot.ProotManager
 import io.neoterm.utils.NLog
 import java.io.File
 import java.nio.file.Files
@@ -238,6 +239,12 @@ object NeoPreference {
   }
 
   fun findLoginProgram(loginProgramName: String): String? {
+    // Proot módban a shellek a disztró rootfs-ében élnek (pl. /usr/bin/zsh),
+    // nem a Termux-stílusú usr/bin-ben — ott kell keresni, különben a telepített
+    // shellt (pl. zsh) tévesen "nincs telepítve"-ként jelzi.
+    if (isProotEnabled()) {
+      return ProotManager.findShell(loginProgramName)
+    }
     val file = File("${NeoTermPath.USR_PATH}/bin", loginProgramName)
     return if (file.canExecute()) file.absolutePath else null
   }

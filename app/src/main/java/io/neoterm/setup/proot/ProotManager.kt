@@ -61,6 +61,27 @@ object ProotManager {
   fun isInstalled(distro: Distro = selectedDistro()): Boolean =
     isProotBinaryInstalled() && isRootfsInstalled(distro)
 
+  /** A guest-rootfs szokásos bináris-könyvtárai, ahol egy shell lehet. */
+  private val GUEST_BIN_DIRS = listOf("/usr/bin", "/bin", "/usr/local/bin", "/sbin", "/usr/sbin")
+
+  /**
+   * Megkeresi a megadott shellt (pl. "zsh") a disztró rootfs-én belül, és
+   * visszaadja a GUEST-oldali útvonalát (pl. "/usr/bin/zsh"), vagy null-t, ha
+   * nincs telepítve. A szimbolikus linkeket is elfogadja (a merged-/usr
+   * disztrókban a /bin → /usr/bin link miatt).
+   */
+  fun findShell(name: String, distro: Distro = selectedDistro()): String? {
+    if (name.isEmpty()) return null
+    val rootfs = distro.rootfsPath()
+    for (dir in GUEST_BIN_DIRS) {
+      val hostFile = File("$rootfs$dir/$name")
+      if (hostFile.exists()) {
+        return "$dir/$name"
+      }
+    }
+    return null
+  }
+
   /**
    * Csak azokat az archokat támogatjuk, amikhez van proot bináris: a beépített
    * libproot.so (arm64) vagy a letölthető aarch64. Más archon (armeabi-v7a,
