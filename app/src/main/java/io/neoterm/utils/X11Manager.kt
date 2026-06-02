@@ -4,7 +4,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import android.system.Os
 import com.termux.x11.CmdEntryPoint
+import io.neoterm.component.config.NeoTermPath
+import io.neoterm.setup.proot.ProotManager
+import java.io.File
 
 /**
  * Drives the embedded Termux:X11 native X server, which is built directly into
@@ -48,6 +52,7 @@ object X11Manager {
    */
   fun startServer(context: Context) {
     val app = context.applicationContext
+    prepareServerEnv()
     // Open the GUI first; MainActivity registers the ACTION_START receiver, and
     // the server re-broadcasts every second until connected, so order is safe.
     launchDisplay(context)
@@ -59,6 +64,35 @@ object X11Manager {
       }.onFailure {
         NLog.e("X11Manager", "Failed to start in-process X server: ${it.localizedMessage}")
       }
+    }
+  }
+
+  /**
+   * Set up the process env the native X server reads (getenv):
+   *  - TMPDIR: the server creates its unix socket at $TMPDIR/.X11-unix/X0. We
+   *    point it at the dir proot binds to the guest's /tmp/.X11-unix (see
+   *    ProotManager), so DISPLAY=:0 inside the distro reaches the same socket.
+   *  - XKB_CONFIG_ROOT: the keyboard config data (/usr/share/X11/xkb) the server
+   *    requires to start — it lives in the selected distro's rootfs once the X11
+   *    environment (xkb-data / xkeyboard-config) is installed.
+   */
+  private fun prepareServerEnv() {
+    runCatching {
+      val tmp = File(NeoTermPath.PROOT_ROOT_PATH, "x11")
+      File(tmp, ".X11-unix").mkdirs()
+      Os.setenv("TMPDIR", tmp.absolutePath, true)
+
+      val xkb = File(ProotManager.selectedDistro().rootfsPath(), "usr/share/X11/xkb")
+      if (xkb.exists()) {
+        Os.setenv("XKB_CONFIG_ROOT", xkb.absolutePath, true)
+      } else {
+        NLog.e(
+          "X11Manager",
+          "XKB data missing at ${xkb.absolutePath} — run 'Install X11 environment' first"
+        )
+      }
+    }.onFailure {
+      NLog.e("X11Manager", "Failed to prepare X11 env: ${it.localizedMessage}")
     }
   }
 }

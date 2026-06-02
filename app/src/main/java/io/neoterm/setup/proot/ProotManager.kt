@@ -154,9 +154,11 @@ object ProotManager {
     }
 
     // X11: megosztott socket-könyvtár, hogy a guest GUI-appjai elérjék az
-    // (Android-oldali) X-szervert a DISPLAY=:0-n. A könyvtárat itt hozzuk létre;
-    // az X-szerver ide teszi a unix socketjét (pl. /tmp/.X11-unix/X0).
-    val x11SocketDir = File("${NeoTermPath.PROOT_ROOT_PATH}/x11").apply { mkdirs() }
+    // (Android-oldali) X-szervert a DISPLAY=:0-n. A beágyazott X-szerver a
+    // TMPDIR=${PROOT_ROOT_PATH}/x11 alatt hozza létre a unix socketjét
+    // (.X11-unix/X0), ezért pontosan azt a könyvtárat kötjük a guest
+    // /tmp/.X11-unix-jára (lásd X11Manager).
+    val x11SocketDir = File("${NeoTermPath.PROOT_ROOT_PATH}/x11/.X11-unix").apply { mkdirs() }
     bind(args, x11SocketDir.absolutePath, "/tmp/.X11-unix")
 
     args.add("-w"); args.add(guestCwd)

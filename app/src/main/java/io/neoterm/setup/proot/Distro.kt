@@ -41,9 +41,11 @@ enum class Distro(
    */
   val x11Packages: String
     get() = when (packageManager) {
-      "apk" -> "xterm openbox font-dejavu xrandr"
-      "pacman" -> "xterm openbox xorg-xrandr ttf-dejavu"
-      else -> "xterm openbox x11-xserver-utils dbus-x11 fonts-dejavu"
+      // xkeyboard-config / xkb-data ships /usr/share/X11/xkb, which the embedded
+      // X server needs (XKB_CONFIG_ROOT) or it refuses to start.
+      "apk" -> "xterm openbox font-dejavu xrandr xkeyboard-config"
+      "pacman" -> "xterm openbox xorg-xrandr ttf-dejavu xkeyboard-config"
+      else -> "xterm openbox x11-xserver-utils dbus-x11 fonts-dejavu xkb-data"
     }
 
   /** A disztró kibontott rootfs-ének gyökere a hoston. */
