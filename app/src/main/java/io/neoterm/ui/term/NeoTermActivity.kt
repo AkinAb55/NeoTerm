@@ -37,12 +37,17 @@ import io.neoterm.frontend.session.terminal.*
 import io.neoterm.services.NeoTermService
 import io.neoterm.setup.SetupHelper
 import io.neoterm.ui.other.SetupActivity
+import android.widget.Toast
+import io.neoterm.setup.proot.PackageAction
+import io.neoterm.setup.proot.ProotManager
 import io.neoterm.ui.pm.PackageManagerActivity
 import io.neoterm.ui.settings.SettingActivity
 import io.neoterm.utils.FullScreenHelper
 import io.neoterm.utils.NeoPermission
 import io.neoterm.utils.RangedInt
 import io.neoterm.utils.UpdateManager
+import io.neoterm.utils.X11Manager
+import io.neoterm.utils.runPackageManager
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
@@ -240,8 +245,43 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         addXSession()
         true
       }
+      R.id.menu_item_x11_start -> {
+        startX11()
+        true
+      }
+      R.id.menu_item_x11_install_env -> {
+        installX11Environment()
+        true
+      }
       else -> super.onOptionsItemSelected(item)
     }
+  }
+
+  /** Start the native X11 server, installing the Termux:X11 package first if needed. */
+  private fun startX11() {
+    if (!X11Manager.isServerInstalled(this)) {
+      AlertDialog.Builder(this)
+        .setTitle(R.string.x11_install_server_title)
+        .setMessage(R.string.x11_install_server_message)
+        .setPositiveButton(R.string.update_download_install) { _, _ ->
+          if (!UpdateManager.canInstall(this)) {
+            UpdateManager.requestInstallPermission(this)
+          } else {
+            X11Manager.downloadAndInstall(this)
+          }
+        }
+        .setNegativeButton(android.R.string.cancel, null)
+        .show()
+      return
+    }
+    X11Manager.startServer(this)
+    Toast.makeText(this, R.string.x11_started_hint, Toast.LENGTH_LONG).show()
+  }
+
+  /** Install the X11 client environment (xterm + openbox + fonts) into the distro. */
+  private fun installX11Environment() {
+    Toast.makeText(this, R.string.x11_install_env_started, Toast.LENGTH_SHORT).show()
+    runPackageManager(PackageAction.INSTALL, ProotManager.selectedDistro().x11Packages) { }
   }
 
   override fun onPause() {

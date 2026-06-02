@@ -36,6 +36,21 @@
   </item>
 
   <item
+    android:title="@string/x11_menu"
+    app:showAsAction="never">
+    <menu>
+      <item
+        android:id="@+id/menu_item_x11_start"
+        android:title="@string/x11_start"
+        app:showAsAction="never"/>
+      <item
+        android:id="@+id/menu_item_x11_install_env"
+        android:title="@string/x11_install_env"
+        app:showAsAction="never"/>
+    </menu>
+  </item>
+
+  <item
     android:id="@+id/menu_item_package_settings"
     android:title="@string/package_settings"
     app:showAsAction="never"/>

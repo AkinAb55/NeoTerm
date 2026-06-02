@@ -34,6 +34,18 @@ enum class Distro(
   KALI("kali", "Kali Linux (rolling)", "/bin/bash", arrayOf("--login"), "tar.xz", "apt"),
   ARCH("arch", "Arch Linux", "/bin/bash", arrayOf("--login"), "tar.gz", "pacman");
 
+  /**
+   * X11 kliens-környezet csomagjai (a megfelelő csomagkezelőhöz). A natív
+   * X-szerver a Termux:X11, ezért a disztróba csak kliensek + egy könnyű WM
+   * (openbox) + betűk kellenek, NEM teljes X-szerver.
+   */
+  val x11Packages: String
+    get() = when (packageManager) {
+      "apk" -> "xterm openbox font-dejavu xrandr"
+      "pacman" -> "xterm openbox xorg-xrandr ttf-dejavu"
+      else -> "xterm openbox x11-xserver-utils dbus-x11 fonts-dejavu"
+    }
+
   /** A disztró kibontott rootfs-ének gyökere a hoston. */
   fun rootfsPath(): String = "${NeoTermPath.ROOTFS_PATH}/$id"
 

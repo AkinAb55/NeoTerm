@@ -163,6 +163,13 @@
   <string name="update_open_releases">Open releases</string>
   <string name="update_need_install_permission">To install updates, allow NeoTerm to install unknown apps, then try again.</string>
   <string name="update_open_settings">Open settings</string>
+  <string name="x11_menu">X11 (GUI)</string>
+  <string name="x11_start">Start X11</string>
+  <string name="x11_install_env">Install X11 environment</string>
+  <string name="x11_install_server_title">Install Termux:X11</string>
+  <string name="x11_install_server_message">The native X11 server is needed to show Linux GUI apps. Download and install it now?</string>
+  <string name="x11_started_hint">X11 server started. In a session run e.g.: openbox &amp; xterm</string>
+  <string name="x11_install_env_started">Installing the X11 environment (xterm + openbox)…</string>
   <string name="about_reset_label">Reset App</string>
   <string name="about_reset_label_desc">Clear all files except user home directory</string>
   <string name="support_donate_label">Donate</string>
