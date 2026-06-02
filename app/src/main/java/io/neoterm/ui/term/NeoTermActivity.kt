@@ -341,6 +341,10 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     tab?.onWindowFocusChanged(hasFocus)
     if (hasFocus) {
       raiseKeyboardForSelectedTab()
+      // Re-measure + redraw the active terminal whenever the window regains
+      // focus. This is exactly what makes returning from recents recover a
+      // blank first session, so doing it here also covers the first launch.
+      (tab as? TermTab)?.resetStatus()
     }
   }
 

@@ -8,6 +8,7 @@ import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import androidx.appcompat.widget.Toolbar
@@ -100,27 +101,15 @@ class NeoTabDecorator(val context: NeoTermActivity) : TabSwitcherDecorator() {
           // (posted + switcher-aware; no-op while the switcher overview shows).
           terminalView.requestFocus()
           this.context.raiseKeyboard(terminalView)
-          // Force a layout + redraw once the view is laid out. When switching
-          // very fast (e.g. right after closing a session) the view may not be
-          // measured yet, so attachSession's updateSize() can't build the
-          // emulator and the terminal stays blank until the next layout pass
-          // (which is why backgrounding/foregrounding "fixes" it).
-          //
-          // A short fade-in also gives a subtle transition when opening,
-          // switching or closing tabs, and hides the first-frame layout glitch
-          // on the very first launch. alpha is dropped to 0 only inside the
-          // posted block, right before the animation starts, and forced back to
-          // 1 when it ends, so the terminal can never be left invisible if the
-          // animation is interrupted (which previously looked like "the first
-          // window doesn't open").
-          terminalView.post {
-            terminalView.updateSize()
-            terminalView.onScreenUpdated()
-            terminalView.alpha = 0f
-            terminalView.animate().alpha(1f).setDuration(120)
-              .withEndAction { terminalView.alpha = 1f }
-              .start()
-          }
+          // Build the emulator + redraw once the view actually has a size. When
+          // showing the very first session (right after setup) or switching very
+          // fast, the view may not be measured yet, so updateSize() can't build
+          // the emulator and the shell output never gets drawn — the terminal
+          // stays blank (just the background) until a full relayout, which is
+          // why returning from recents "fixes" it. Waiting for a real layout and
+          // then forcing onScreenUpdated() draws whatever the shell already
+          // produced.
+          refreshWhenLaidOut(terminalView)
         }
       }
 
@@ -129,6 +118,46 @@ class NeoTabDecorator(val context: NeoTermActivity) : TabSwitcherDecorator() {
         bindXSessionView(tab as XSessionTab)
       }
     }
+  }
+
+  /**
+   * Run the size/redraw refresh once the terminal view has a real size. If it
+   * is already laid out, refresh on the next frame; otherwise wait for the
+   * first layout that gives it non-zero dimensions. Without this the first
+   * session after setup opens blank until a relayout (e.g. returning from
+   * recents).
+   */
+  private fun refreshWhenLaidOut(terminalView: TerminalView) {
+    if (terminalView.width > 0 && terminalView.height > 0) {
+      terminalView.post { refreshTerminal(terminalView) }
+      return
+    }
+    terminalView.viewTreeObserver.addOnGlobalLayoutListener(
+      object : ViewTreeObserver.OnGlobalLayoutListener {
+        override fun onGlobalLayout() {
+          if (terminalView.width <= 0 || terminalView.height <= 0) {
+            return
+          }
+          if (terminalView.viewTreeObserver.isAlive) {
+            terminalView.viewTreeObserver.removeOnGlobalLayoutListener(this)
+          }
+          refreshTerminal(terminalView)
+        }
+      })
+  }
+
+  private fun refreshTerminal(terminalView: TerminalView) {
+    terminalView.updateSize()
+    // Force a redraw of whatever the shell already produced; onScreenUpdated()
+    // earlier may have been skipped because the emulator did not exist yet.
+    terminalView.onScreenUpdated()
+    // A short fade-in gives a subtle transition when opening/switching/closing
+    // tabs. alpha is dropped to 0 only here, right before the animation, and
+    // forced back to 1 on end so the terminal can never be left invisible.
+    terminalView.alpha = 0f
+    terminalView.animate().alpha(1f).setDuration(120)
+      .withEndAction { terminalView.alpha = 1f }
+      .start()
   }
 
   private fun bindXSessionView(tab: XSessionTab) {
