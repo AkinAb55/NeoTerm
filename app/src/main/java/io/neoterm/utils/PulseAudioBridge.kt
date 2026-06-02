@@ -1,42 +1,48 @@
 package io.neoterm.utils
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
-import io.neoterm.setup.proot.ProotManager
+import android.system.Os
+import io.neoterm.BuildConfig
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import java.io.File
-import java.net.InetSocketAddress
-import java.net.Socket
+import java.io.FileInputStream
+import java.io.InputStream
 
 /**
- * Plays the distro's audio on the Android speaker.
+ * Android-side PulseAudio: plays the distro's audio on the device speaker.
  *
- * We run PulseAudio inside the proot distro (started here in --system mode so it
- * works as root) configured with:
+ * A vanilla PulseAudio cross-built for Android (bundled in assets as
+ * pulseaudio-aarch64.tar.gz) runs as the app uid — no root, no proot, so it's
+ * stable — configured with:
  *   - module-native-protocol-tcp on :4713 — distro apps connect via
  *     PULSE_SERVER=127.0.0.1:4713 (set in ProotManager);
- *   - a null sink whose monitor is streamed as raw PCM over
- *     module-simple-protocol-tcp on :4712.
- *
- * This bridge is the TCP client of that :4712 stream: it reads s16le/48k/stereo
- * PCM and writes it to an AudioTrack. It retries until PulseAudio is up, so the
- * order of bring-up doesn't matter.
+ *   - module-pipe-sink → a FIFO we read here and write to an AudioTrack.
  *
  * @author kiva
  */
 object PulseAudioBridge {
-  private const val PCM_PORT = 4712
   private const val SAMPLE_RATE = 48000
 
   @Volatile private var running = false
   private var thread: Thread? = null
   private var paProcess: Process? = null
 
-  fun start() {
+  fun start(context: Context) {
     if (running) return
     running = true
-    startDistroPulseAudio()
-    thread = Thread({ pumpLoop() }, "pulse-bridge").apply { isDaemon = true; start() }
+    val app = context.applicationContext
+    val dir = prepare(app)
+    if (dir == null) {
+      running = false
+      return
+    }
+    val fifo = File(dir, "runtime/fifo")
+    startPulseAudio(dir, fifo)
+    thread = Thread({ pumpLoop(fifo) }, "pulse-bridge").apply { isDaemon = true; start() }
   }
 
   fun stop() {
@@ -47,20 +53,85 @@ object PulseAudioBridge {
     paProcess = null
   }
 
-  private fun pumpLoop() {
+  /** Extract the bundled PulseAudio once per app version; returns its dir. */
+  private fun prepare(context: Context): File? {
+    return runCatching {
+      val dir = File(context.filesDir, "pulseaudio")
+      val verFile = File(dir, ".ver")
+      val ver = BuildConfig.VERSION_CODE.toString()
+      val bin = File(dir, "bin/pulseaudio")
+      if (bin.exists() && verFile.exists() && verFile.readText() == ver) {
+        return@runCatching dir
+      }
+      dir.deleteRecursively()
+      dir.mkdirs()
+      context.assets.open("pulseaudio-aarch64.tar.gz").use { raw ->
+        GzipCompressorInputStream(raw).use { gz ->
+          TarArchiveInputStream(gz).use { tar ->
+            var entry = tar.nextTarEntry
+            while (entry != null) {
+              val out = File(dir, entry.name)
+              if (entry.isDirectory) {
+                out.mkdirs()
+              } else {
+                out.parentFile?.mkdirs()
+                out.outputStream().use { tar.copyTo(it) }
+              }
+              entry = tar.nextTarEntry
+            }
+          }
+        }
+      }
+      bin.setExecutable(true, false)
+      File(dir, "runtime").mkdirs()
+      verFile.writeText(ver)
+      dir
+    }.onFailure {
+      NLog.e("PulseAudioBridge", "Failed to extract PulseAudio: ${it.localizedMessage}")
+    }.getOrNull()
+  }
+
+  private fun startPulseAudio(dir: File, fifo: File) {
+    runCatching {
+      val runtime = File(dir, "runtime").apply { mkdirs() }
+      if (fifo.exists()) fifo.delete()
+      runCatching { Os.mkfifo(fifo.absolutePath, 432 /* 0660 */) }
+
+      val bin = File(dir, "bin/pulseaudio").absolutePath
+      val modules = File(dir, "lib/pulseaudio/modules").absolutePath
+      val log = File(dir, "pulse.log").absolutePath
+      val pb = ProcessBuilder(
+        bin, "-n", "--daemonize=no", "--exit-idle-time=-1", "--disable-shm=true",
+        "--dl-search-path=$modules",
+        "--log-target=newfile:$log", "--log-level=notice",
+        "-L", "module-native-protocol-tcp port=4713 auth-ip-acl=127.0.0.1 auth-anonymous=1",
+        "-L", "module-pipe-sink file=${fifo.absolutePath} sink_name=neoterm rate=$SAMPLE_RATE channels=2 format=s16le"
+      )
+      val env = pb.environment()
+      env["HOME"] = runtime.absolutePath
+      env["XDG_RUNTIME_DIR"] = runtime.absolutePath
+      env["PULSE_RUNTIME_PATH"] = runtime.absolutePath
+      env["LD_LIBRARY_PATH"] = File(dir, "lib").absolutePath
+      pb.redirectErrorStream(true)
+      pb.redirectOutput(ProcessBuilder.Redirect.to(File(dir, "pulse-stdout.log")))
+      paProcess = pb.start()
+      NLog.e("PulseAudioBridge", "PulseAudio started on :4713")
+    }.onFailure {
+      NLog.e("PulseAudioBridge", "Failed to start PulseAudio: ${it.localizedMessage}")
+    }
+  }
+
+  private fun pumpLoop(fifo: File) {
     val minBuf = AudioTrack.getMinBufferSize(
       SAMPLE_RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT
     )
-    val bufSize = maxOf(minBuf, SAMPLE_RATE) // ~quarter second of stereo s16
+    val bufSize = maxOf(minBuf, SAMPLE_RATE)
     while (running) {
-      var socket: Socket? = null
       var track: AudioTrack? = null
+      var input: InputStream? = null
       try {
-        socket = Socket().apply {
-          tcpNoDelay = true
-          connect(InetSocketAddress("127.0.0.1", PCM_PORT), 1500)
-        }
-        val input = socket.getInputStream()
+        // Blocks until PulseAudio's pipe-sink opens the write end.
+        input = FileInputStream(fifo)
         track = AudioTrack.Builder()
           .setAudioAttributes(
             AudioAttributes.Builder()
@@ -87,57 +158,19 @@ object PulseAudioBridge {
           if (n > 0) track.write(buf, 0, n)
         }
       } catch (e: Exception) {
-        // PulseAudio not up yet, or the stream dropped — retry below.
+        // FIFO not ready yet / stream dropped — retry.
       } finally {
         runCatching { track?.stop() }
         runCatching { track?.release() }
-        runCatching { socket?.close() }
+        runCatching { input?.close() }
       }
       if (running) {
         try {
-          Thread.sleep(1000)
+          Thread.sleep(800)
         } catch (e: InterruptedException) {
           break
         }
       }
-    }
-  }
-
-  /** Write the PA config into the distro and start the daemon (idempotent). */
-  private fun startDistroPulseAudio() {
-    runCatching {
-      val cfg = "/root/.config/pulse/neoterm.pa"
-      val script = buildString {
-        append("mkdir -p /root/.config/pulse; ")
-        append("cat > ").append(cfg).append(" <<'EOF'\n")
-        append("load-module module-native-protocol-tcp port=4713 auth-ip-acl=127.0.0.1 auth-anonymous=1\n")
-        append("load-module module-null-sink sink_name=neoterm sink_properties=device.description=NeoTerm rate=48000 channels=2\n")
-        append("set-default-sink neoterm\n")
-        append("load-module module-simple-protocol-tcp source=neoterm.monitor record=true format=s16le rate=48000 channels=2 listen=127.0.0.1 port=4712\n")
-        append("EOF\n")
-        // Run in the FOREGROUND (not --daemonize): the daemon needs this proot
-        // alive for path translation, so we keep the proot process running and
-        // tear it down on stop(). --system runs it as root in the container.
-        append("exec pulseaudio --system --disallow-exit --disable-shm --exit-idle-time=-1 ")
-        append("-nF ").append(cfg).append(" --daemonize=no ")
-        append("--log-target=stderr\n")
-      }
-      val launch = ProotManager.buildLaunch(command = listOf(script))
-      val pb = ProcessBuilder(mutableListOf(launch.executable).apply { addAll(launch.args) })
-      val env = pb.environment()
-      launch.env.forEach {
-        val i = it.indexOf('=')
-        if (i >= 0) env[it.substring(0, i)] = it.substring(i + 1)
-      }
-      pb.directory(File(launch.hostCwd))
-      pb.redirectErrorStream(true)
-      // Capture output so PulseAudio failures are diagnosable: cat this file.
-      val log = File(io.neoterm.App.get().filesDir, "x11/pulse.log")
-      runCatching { log.parentFile?.mkdirs() }
-      pb.redirectOutput(ProcessBuilder.Redirect.to(log))
-      paProcess = pb.start()
-    }.onFailure {
-      NLog.e("PulseAudioBridge", "Failed to start distro PulseAudio: ${it.localizedMessage}")
     }
   }
 }

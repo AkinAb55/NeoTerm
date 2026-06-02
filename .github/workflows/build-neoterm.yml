@@ -27,10 +27,6 @@ on:
         description: "GitHub Release közzététele (APK + proot + rootfs)"
         type: boolean
         default: true
-      build_pulseaudio:
-        description: "PulseAudio natív cross-build (Android-oldali hang) — fejlesztés alatt"
-        type: boolean
-        default: false
 
 env:
   NDK_VERSION: "26.1.10909125"
@@ -81,7 +77,7 @@ jobs:
   # ── 2) NeoTerm APK (a proot binárist beágyazva) ─────────────────────────
   build-apk:
     name: APK (${{ inputs.build_type }})
-    needs: build-proot
+    needs: [build-proot, build-pulseaudio]
     runs-on: ubuntu-latest
     steps:
       - name: Clone repository
@@ -136,6 +132,21 @@ jobs:
              app/src/main/jniLibs/arm64-v8a/libproot.so
           chmod +x app/src/main/jniLibs/arm64-v8a/libproot.so
           ls -l app/src/main/jniLibs/arm64-v8a/
+
+      - name: Fetch PulseAudio build
+        uses: actions/download-artifact@v4
+        with:
+          name: pulseaudio-aarch64
+          path: ${{ github.workspace }}/pulseaudio-bin
+
+      - name: Bundle PulseAudio into APK (assets)
+        run: |
+          # Android-side PulseAudio server (binary + libs + modules), extracted
+          # and run by PulseAudioBridge at runtime.
+          mkdir -p app/src/main/assets
+          cp "${GITHUB_WORKSPACE}/pulseaudio-bin/pulseaudio-aarch64.tar.gz" \
+             app/src/main/assets/pulseaudio-aarch64.tar.gz
+          ls -lh app/src/main/assets/pulseaudio-aarch64.tar.gz
 
       - name: Bump version automatically (per build)
         run: |
@@ -196,7 +207,6 @@ jobs:
   # ── 3b) PulseAudio natív cross-build (Android-oldali hang, opcionális) ───
   build-pulseaudio:
     name: PulseAudio (aarch64)
-    if: ${{ inputs.build_pulseaudio }}
     runs-on: ubuntu-latest
     steps:
       - name: Clone repository

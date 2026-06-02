@@ -42,11 +42,12 @@ enum class Distro(
   val x11Packages: String
     get() = when (packageManager) {
       // xkeyboard-config / xkb-data ships /usr/share/X11/xkb, which the embedded
-      // X server needs (XKB_CONFIG_ROOT) or it refuses to start. pulseaudio
-      // provides audio (NeoTerm streams its monitor to the Android speaker).
-      "apk" -> "xterm openbox font-dejavu xrandr xkeyboard-config pulseaudio pulseaudio-utils"
-      "pacman" -> "xterm openbox xorg-xrandr ttf-dejavu xkeyboard-config pulseaudio"
-      else -> "xterm openbox x11-xserver-utils dbus-x11 fonts-dejavu xkb-data pulseaudio pulseaudio-utils"
+      // X server needs (XKB_CONFIG_ROOT) or it refuses to start. The PulseAudio
+      // *client* (libpulse + pactl/paplay) lets apps reach NeoTerm's Android-side
+      // PulseAudio server on PULSE_SERVER=127.0.0.1:4713 — no distro server.
+      "apk" -> "xterm openbox font-dejavu xrandr xkeyboard-config pulseaudio-utils"
+      "pacman" -> "xterm openbox xorg-xrandr ttf-dejavu xkeyboard-config libpulse"
+      else -> "xterm openbox x11-xserver-utils dbus-x11 fonts-dejavu xkb-data pulseaudio-utils"
     }
 
   /** A disztró kibontott rootfs-ének gyökere a hoston. */

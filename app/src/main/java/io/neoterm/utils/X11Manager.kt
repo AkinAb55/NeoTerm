@@ -77,8 +77,8 @@ object X11Manager {
     }.onFailure {
       NLog.e("X11Manager", "Failed to start X server: ${it.localizedMessage}")
     }
-    // Bring up audio (distro PulseAudio + Android playback bridge).
-    PulseAudioBridge.start()
+    // Bring up audio (Android-side PulseAudio + AudioTrack playback bridge).
+    PulseAudioBridge.start(context)
     launchDisplay(context)
   }
 
