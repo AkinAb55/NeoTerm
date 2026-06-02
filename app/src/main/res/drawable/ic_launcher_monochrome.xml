@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon (Android 13+) monochrome layer: the ">_" prompt as a single
+     silhouette; the system tints it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="9"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M34,40 L52,54 L34,68" />
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M58.5,62 H75.5 A2.5,2.5 0 0 1 78,64.5 V69.5 A2.5,2.5 0 0 1 75.5,72 H58.5 A2.5,2.5 0 0 1 56,69.5 V64.5 A2.5,2.5 0 0 1 58.5,62 Z" />
+</vector>
