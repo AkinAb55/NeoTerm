@@ -1,6 +1,13 @@
 apply plugin: 'java-library'
 apply plugin: 'kotlin'
 
+// Keep Java and Kotlin on the same JVM target (Kotlin uses 1.8 below), otherwise
+// Gradle 8 fails with "Inconsistent JVM-target compatibility" under JDK 17.
+java {
+  sourceCompatibility = JavaVersion.VERSION_1_8
+  targetCompatibility = JavaVersion.VERSION_1_8
+}
+
 dependencies {
   implementation fileTree(dir: 'libs', include: ['*.jar'])
   api rootProject.ext.deps["kotlin-stdlib"]
