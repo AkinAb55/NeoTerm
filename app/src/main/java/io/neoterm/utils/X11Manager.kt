@@ -77,6 +77,8 @@ object X11Manager {
     }.onFailure {
       NLog.e("X11Manager", "Failed to start X server: ${it.localizedMessage}")
     }
+    // Bring up audio (distro PulseAudio + Android playback bridge).
+    PulseAudioBridge.start()
     launchDisplay(context)
   }
 
@@ -86,6 +88,7 @@ object X11Manager {
    * server actually exits).
    */
   fun stopServer(context: Context) {
+    PulseAudioBridge.stop()
     runCatching {
       MainActivity.getInstance()?.finishAndRemoveTask()
       context.startService(
