@@ -99,6 +99,7 @@ class TermViewClient(val context: Context) : TerminalViewClient {
       when (unicodeChar) {
         'v' -> termUI?.requirePaste()
         'n' -> termUI?.requireCreateNew()
+        'w' -> termUI?.requireClose()
         'z' -> termUI?.requireSwitchToPrevious()
         'x' -> termUI?.requireSwitchToNext()
         'f' -> termUI?.requireToggleFullScreen()
