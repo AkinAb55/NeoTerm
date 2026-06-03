@@ -141,6 +141,10 @@ object ProotManager {
     bind(args, "/proc/self/fd/0", "/dev/stdin")
     bind(args, "/proc/self/fd/1", "/dev/stdout")
     bind(args, "/proc/self/fd/2", "/dev/stderr")
+    // Android's /dev has no shm; browsers and many apps need a writable
+    // /dev/shm (POSIX shared memory) or their child processes crash.
+    val shmDir = File("${NeoTermPath.PROOT_ROOT_PATH}/shm").apply { mkdirs() }
+    bind(args, shmDir.absolutePath, "/dev/shm")
     bind(args, "/dev/urandom", "/dev/random")
 
     // Fake /proc fájlok (proot-distro sysdata mintájára): az Android korlátozott
@@ -183,6 +187,10 @@ object ProotManager {
     args.add("DISPLAY=:0")
     args.add("PULSE_SERVER=127.0.0.1:4713")
     args.add("XDG_RUNTIME_DIR=/tmp")
+    // Firefox's content sandbox can't work under proot (ptrace + no user
+    // namespaces) and SIGSEGVs its child processes; disable it so the browser
+    // is usable. (Chromium needs --no-sandbox on the command line.)
+    args.add("MOZ_DISABLE_CONTENT_SANDBOX=1")
     extraEnv.forEach { if (it.isNotEmpty()) args.add(it) }
 
     // A guest shell + login-kapcsoló(k), vagy egy konkrét parancs `sh -c`-vel.
