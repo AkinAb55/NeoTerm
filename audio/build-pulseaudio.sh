@@ -124,6 +124,11 @@ curl -L -o "$WORK/pa.tar.xz" \
 tar -C "$WORK" -xf "$WORK/pa.tar.xz"
 PA_SRC="$WORK/pulseaudio-${PA_VERSION}"
 
+# Android seccomp kills setresgid/setresuid (SIGSYS), which pa_drop_root() calls
+# unconditionally. We never run SUID-root, so make it a no-op.
+sed -i 's|^void pa_drop_root(void) {|void pa_drop_root(void) { return; /* NeoTerm: Android seccomp */|' \
+  "$PA_SRC/src/daemon/caps.c"
+
 cat > "$WORK/android-cross.ini" <<EOF
 [binaries]
 c = '$CC'
