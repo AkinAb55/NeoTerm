@@ -1,7 +1,6 @@
 package io.neoterm.frontend.session.view
 
 import android.os.Bundle
-import android.util.Log
 import android.view.inputmethod.EditorInfo
 import io.neoterm.backend.TerminalColors
 import io.neoterm.backend.TerminalEmulator
@@ -18,8 +17,6 @@ import io.neoterm.component.colorscheme.ColorSchemeComponent
  */
 object KeyboardThemeBridge {
 
-  private const val TAG = "KbTheme"
-
   /** EditorInfo.extras key carrying the terminal background color (ARGB int). */
   private const val EXTRA_BACKGROUND = "com.pckeyboard.ime.theme.BACKGROUND"
 
@@ -28,19 +25,15 @@ object KeyboardThemeBridge {
 
   /**
    * Writes the current background/foreground colors into [outAttrs] so the
-   * keyboard is themed from the very first input session.
+   * keyboard is themed from the very first input session. Returns the colors
+   * written (`[background, foreground]`), or null when none were available.
    */
   @JvmStatic
   fun applyTo(outAttrs: EditorInfo, emulator: TerminalEmulator?): IntArray? {
-    val colors = resolveColors(emulator) ?: run {
-      Log.d(TAG, "applyTo: no colors resolved (emulator=${emulator != null})")
-      return null
-    }
+    val colors = resolveColors(emulator) ?: return null
     val extras = outAttrs.extras ?: Bundle().also { outAttrs.extras = it }
     extras.putInt(EXTRA_BACKGROUND, colors[0])
     extras.putInt(EXTRA_FOREGROUND, colors[1])
-    Log.d(TAG, "applyTo: wrote bg=#${Integer.toHexString(colors[0])} " +
-      "fg=#${Integer.toHexString(colors[1])} (emulator=${emulator != null})")
     return colors
   }
 
@@ -53,7 +46,7 @@ object KeyboardThemeBridge {
       return intArrayOf(c[TextStyle.COLOR_INDEX_BACKGROUND], c[TextStyle.COLOR_INDEX_FOREGROUND])
     }
     // Before the session attaches — e.g. the keyboard is shown for the very
-    // first input session — read the user's *configured* color scheme directly.
+    // first input session — read the user's configured color scheme directly.
     // Without this the keyboard would otherwise get the built-in default until
     // the input connection is recreated (e.g. after a recents round-trip).
     configuredColors()?.let { return it }
@@ -65,12 +58,10 @@ object KeyboardThemeBridge {
   private fun configuredColors(): IntArray? {
     return try {
       val scheme = ComponentManager.getComponent<ColorSchemeComponent>().getCurrentColorScheme()
-      Log.d(TAG, "configuredColors: scheme=${scheme.colorName} bg=${scheme.backgroundColor} fg=${scheme.foregroundColor}")
       val bg = scheme.backgroundColor?.let { TerminalColors.parse(it) } ?: return null
       val fg = scheme.foregroundColor?.let { TerminalColors.parse(it) } ?: return null
       intArrayOf(bg, fg)
     } catch (e: Exception) {
-      Log.d(TAG, "configuredColors: failed: $e")
       null
     }
   }
