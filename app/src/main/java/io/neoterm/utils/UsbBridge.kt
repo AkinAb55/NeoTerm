@@ -6,26 +6,42 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
+import android.net.LocalServerSocket
+import android.net.LocalSocket
 import android.os.Build
-import io.neoterm.setup.proot.ProotManager
-import java.io.File
+import android.system.Os
+import java.io.FileDescriptor
 
 /**
  * Android-side USB host integration, wired up *exclusively* through a
- * dynamically-registered [BroadcastReceiver] — deliberately NOT via a manifest
- * `<intent-filter>` + `device_filter` (which would auto-launch the app on every
- * matching plug-in). While NeoTerm runs we listen for attach/detach, request the
- * runtime USB permission via [UsbManager], and publish the granted devices to
- * the distro at `/tmp/neoterm-usb` (bus/device path + VID:PID + name) so Linux
- * USB tooling (lsusb/libusb) has something to work with.
+ * dynamically-registered [BroadcastReceiver] (no manifest device_filter), and
+ * exposed to the proot distro *only* over a socket — nothing is written into the
+ * distro's filesystem.
+ *
+ * Under proot there's no root, no kernel modules and no direct /dev/bus/usb
+ * access, so the only way to talk to a USB device is libusb on the file
+ * descriptor that [UsbManager.openDevice] returns. We keep the connection open
+ * and serve, over an abstract-namespace unix socket ("io.neoterm.usb"):
+ *   - "LIST\n"            → text list of all connected devices (+ permission),
+ *   - "<deviceName>\n"    → that device's fd via SCM_RIGHTS + an "OK …" header.
+ * The abstract socket is reachable from the proot (it shares the net namespace);
+ * a guest client wraps the received fd with libusb_wrap_sys_device.
  *
  * Registered/unregistered by NeoTermService for the app's lifetime.
  */
 object UsbBridge {
   const val ACTION_USB_PERMISSION = "io.neoterm.action.USB_PERMISSION"
+  private const val SOCKET_NAME = "io.neoterm.usb"
 
   private var receiver: BroadcastReceiver? = null
+  private var server: Thread? = null
+  @Volatile private var serverSocket: LocalServerSocket? = null
+
+  // Open connections by device name (/dev/bus/usb/BBB/DDD), kept open so their
+  // fd stays valid for serving to the distro.
+  private val connections = HashMap<String, UsbDeviceConnection>()
 
   fun register(context: Context) {
     if (receiver != null) return
@@ -39,29 +55,34 @@ object UsbBridge {
     // targetSdk 28 → no RECEIVER_EXPORTED/NOT_EXPORTED flag required.
     app.registerReceiver(r, filter)
     receiver = r
-    // Devices already plugged in when we start get the same treatment.
+    startServer(app)
     runCatching { requestForConnected(app) }
   }
 
   fun unregister(context: Context) {
     receiver?.let { runCatching { context.applicationContext.unregisterReceiver(it) } }
     receiver = null
+    runCatching { serverSocket?.close() }
+    serverSocket = null
+    server = null
+    synchronized(connections) {
+      connections.values.forEach { runCatching { it.close() } }
+      connections.clear()
+    }
   }
 
   fun usbManager(context: Context): UsbManager =
     context.getSystemService(Context.USB_SERVICE) as UsbManager
 
-  /** Ask for permission for every currently-connected device. */
+  /** Request permission for everything currently connected (so all become servable). */
   fun requestForConnected(context: Context) {
     val usb = usbManager(context)
     for (device in usb.deviceList.values) requestPermission(context, usb, device)
-    publish(context)
   }
 
-  /** Request the runtime USB permission (or publish immediately if we have it). */
   fun requestPermission(context: Context, usb: UsbManager, device: UsbDevice) {
     if (usb.hasPermission(device)) {
-      publish(context)
+      openAndStore(usb, device)
       return
     }
     val flags = PendingIntent.FLAG_UPDATE_CURRENT or
@@ -71,52 +92,116 @@ object UsbBridge {
     usb.requestPermission(device, pi)
   }
 
-  /**
-   * Write the connected devices (with permission state) to the selected distro's
-   * /tmp/neoterm-usb, so a guest shell can `cat /tmp/neoterm-usb` to see them.
-   */
-  fun publish(context: Context) {
-    runCatching {
-      val usb = usbManager(context)
+  /** Open the device (if permitted) and keep the connection so its fd is servable. */
+  private fun openAndStore(usb: UsbManager, device: UsbDevice) {
+    synchronized(connections) {
+      if (connections.containsKey(device.deviceName)) return
+      runCatching { usb.openDevice(device) }.getOrNull()?.let {
+        connections[device.deviceName] = it
+      }
+    }
+  }
+
+  fun onDetached(device: UsbDevice?) {
+    if (device != null) synchronized(connections) {
+      connections.remove(device.deviceName)?.let { runCatching { it.close() } }
+    }
+  }
+
+  // ---- fd server (abstract unix socket; nothing touches the distro fs) ----
+
+  private fun startServer(context: Context) {
+    if (server != null) return
+    val t = Thread({
+      runCatching {
+        val ss = LocalServerSocket(SOCKET_NAME)
+        serverSocket = ss
+        while (true) {
+          val client = ss.accept() ?: continue
+          runCatching { handleClient(context, client) }
+          runCatching { client.close() }
+        }
+      }
+    }, "usb-fd-server").apply { isDaemon = true }
+    server = t
+    t.start()
+  }
+
+  private fun handleClient(context: Context, client: LocalSocket) {
+    val req = readLine(client) ?: return
+    val usb = usbManager(context)
+    if (req == "LIST") {
       val sb = StringBuilder()
       for (d in usb.deviceList.values) {
-        sb.append(d.deviceName) // /dev/bus/usb/00X/00Y
-          .append("  ")
+        sb.append(d.deviceName).append("  ")
           .append(String.format("%04x:%04x", d.vendorId, d.productId))
         runCatching { d.productName }.getOrNull()?.let { if (it.isNotEmpty()) sb.append("  ").append(it) }
-        sb.append(if (usb.hasPermission(d)) "  [granted]" else "  [no-permission]")
-        sb.append('\n')
+        sb.append(if (usb.hasPermission(d)) "  [granted]" else "  [no-permission]").append('\n')
       }
-      val rootfs = ProotManager.selectedDistro().rootfsPath()
-      val f = File("$rootfs/tmp/neoterm-usb")
-      f.parentFile?.mkdirs()
-      f.writeText(sb.toString())
-      NLog.e("UsbBridge", "USB devices: ${usb.deviceList.size}")
+      client.outputStream.write(sb.toString().toByteArray())
+      client.outputStream.flush()
+      return
     }
+    // Otherwise req is a device name — serve its fd.
+    val device = usb.deviceList.values.firstOrNull { it.deviceName == req }
+    if (device != null && usb.hasPermission(device)) openAndStore(usb, device)
+    val conn = synchronized(connections) { connections[req] }
+    if (conn == null || device == null) {
+      client.outputStream.write("ERR no-permission\n".toByteArray())
+      client.outputStream.flush()
+      return
+    }
+    // Dup the connection's fd so the peer owns an independent copy (we keep ours).
+    val dup = Os.dup(fdFromInt(conn.fileDescriptor))
+    try {
+      client.setFileDescriptorsForSend(arrayOf(dup))
+      val header = "OK ${device.vendorId} ${device.productId} ${device.deviceName}\n"
+      client.outputStream.write(header.toByteArray())
+      client.outputStream.flush()
+    } finally {
+      runCatching { Os.close(dup) }
+    }
+  }
+
+  private fun readLine(client: LocalSocket): String? {
+    val input = client.inputStream
+    val sb = StringBuilder()
+    while (true) {
+      val b = input.read()
+      if (b < 0) return if (sb.isEmpty()) null else sb.toString()
+      if (b == '\n'.code) return sb.toString()
+      sb.append(b.toChar())
+      if (sb.length > 256) return sb.toString()
+    }
+  }
+
+  /** Wrap a raw int fd in a FileDescriptor (for Os.dup). */
+  private fun fdFromInt(fd: Int): FileDescriptor {
+    val f = FileDescriptor()
+    val m = FileDescriptor::class.java.getDeclaredMethod("setInt\$", Int::class.javaPrimitiveType)
+    m.isAccessible = true
+    m.invoke(f, fd)
+    return f
   }
 }
 
-/**
- * Receives USB attach/detach and our permission-result broadcast. Pure
- * BroadcastReceiver flow — no activity intent-filter / device_filter.
- */
+/** USB attach/detach + permission-result broadcasts (no device_filter). */
 class UsbReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
     val usb = UsbBridge.usbManager(context)
     @Suppress("DEPRECATION")
     val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
     when (intent.action) {
-      UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+      UsbManager.ACTION_USB_DEVICE_ATTACHED ->
         if (device != null) UsbBridge.requestPermission(context, usb, device)
-      }
       UsbBridge.ACTION_USB_PERMISSION -> {
         val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
         NLog.e("UsbBridge", "Permission ${if (granted) "granted" else "denied"} for ${device?.deviceName}")
-        UsbBridge.publish(context)
+        if (granted && device != null) UsbBridge.requestPermission(context, usb, device)
       }
       UsbManager.ACTION_USB_DEVICE_DETACHED -> {
         NLog.e("UsbBridge", "Detached ${device?.deviceName}")
-        UsbBridge.publish(context)
+        UsbBridge.onDetached(device)
       }
     }
   }
