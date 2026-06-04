@@ -93,6 +93,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     instance = this
+    io.neoterm.utils.NLog.e("NeoTermSvcDbg", "Activity.onCreate")
 
     // Keep the screen on while the terminal is in front (on by default).
     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -430,6 +431,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
 
   override fun onDestroy() {
     super.onDestroy()
+    io.neoterm.utils.NLog.e("NeoTermSvcDbg", "Activity.onDestroy isFinishing=$isFinishing")
     if (instance === this) instance = null
     val tab = tabSwitcher.selectedTab as NeoTab?
     tab?.onDestroy()

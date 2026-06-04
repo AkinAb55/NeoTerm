@@ -53,6 +53,7 @@ class NeoTermService : Service() {
 
   override fun onCreate() {
     super.onCreate()
+    NLog.e("NeoTermSvcDbg", "onCreate pid=${android.os.Process.myPid()}")
     createNotificationChannel()
     startForeground(NOTIFICATION_ID, createNotification())
     // Wake lock on by default (keep the CPU running). Don't pop the battery-
@@ -69,6 +70,7 @@ class NeoTermService : Service() {
 
   override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
     val action = intent.action
+    NLog.e("NeoTermSvcDbg", "onStartCommand action=$action flags=$flags startId=$startId")
     when (action) {
       ACTION_SERVICE_STOP -> {
         NLog.e("NeoTermSvcDbg", "ACTION_SERVICE_STOP: term=${mTerminalSessions.size} x=${mXSessions.size}")
