@@ -53,7 +53,6 @@ class NeoTermService : Service() {
 
   override fun onCreate() {
     super.onCreate()
-    NLog.e("NeoTermSvcDbg", "onCreate pid=${android.os.Process.myPid()}")
     createNotificationChannel()
     startForeground(NOTIFICATION_ID, createNotification())
     // Wake lock on by default (keep the CPU running). Don't pop the battery-
@@ -70,10 +69,8 @@ class NeoTermService : Service() {
 
   override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
     val action = intent.action
-    NLog.e("NeoTermSvcDbg", "onStartCommand action=$action flags=$flags startId=$startId")
     when (action) {
       ACTION_SERVICE_STOP -> {
-        NLog.e("NeoTermSvcDbg", "ACTION_SERVICE_STOP: term=${mTerminalSessions.size} x=${mXSessions.size}")
         for (i in mTerminalSessions.indices)
           mTerminalSessions[i].finishIfRunning()
         teardownAndStop()
@@ -92,7 +89,6 @@ class NeoTermService : Service() {
   }
 
   override fun onDestroy() {
-    NLog.e("NeoTermSvcDbg", "onDestroy")
     stopForeground(true)
     stopX11Server()
     io.neoterm.utils.PulseAudioBridge.stop()
@@ -144,11 +140,6 @@ class NeoTermService : Service() {
 
   fun removeTermSession(sessionToRemove: TerminalSession): Int {
     val indexOfRemoved = mTerminalSessions.indexOf(sessionToRemove)
-    android.util.Log.e(
-      "NeoTermSvcDbg",
-      "removeTermSession idx=$indexOfRemoved running=${sessionToRemove.isRunning}",
-      Throwable("removeTermSession caller")
-    )
     if (indexOfRemoved >= 0) {
       mTerminalSessions.removeAt(indexOfRemoved)
       updateNotification()
@@ -181,10 +172,6 @@ class NeoTermService : Service() {
    * doesn't linger (or get re-spawned) with zero sessions.
    */
   private fun stopSelfIfNoSessions() {
-    NLog.e(
-      "NeoTermSvcDbg",
-      "stopSelfIfNoSessions: term=${mTerminalSessions.size} x=${mXSessions.size}"
-    )
     if (mTerminalSessions.isEmpty() && mXSessions.isEmpty()) {
       teardownAndStop()
     }
@@ -197,9 +184,7 @@ class NeoTermService : Service() {
    * X11 server process.
    */
   private fun teardownAndStop() {
-    val activity = NeoTermActivity.getInstance()
-    NLog.e("NeoTermSvcDbg", "teardownAndStop: activityInstance=${activity != null}")
-    activity?.finishAndRemoveTask()
+    NeoTermActivity.getInstance()?.finishAndRemoveTask()
     // Close the embedded X11 window too (its server is unbound in onDestroy).
     // We must NOT route this through startService(ACTION_X11_STOP): that would
     // re-create this just-stopped service and bring back a session-less
@@ -207,7 +192,6 @@ class NeoTermService : Service() {
     runCatching { com.termux.x11.MainActivity.getInstance()?.finishAndRemoveTask() }
     stopForeground(true)
     stopSelf()
-    NLog.e("NeoTermSvcDbg", "teardownAndStop: stopSelf() called")
   }
 
   private fun createOrFindSession(parameter: ShellParameter): TerminalSession {
