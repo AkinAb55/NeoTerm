@@ -351,6 +351,9 @@ class TermSessionCallback : TerminalSession.SessionChangedCallback {
     val termView = termSessionData?.termView
     if (session != null && termView != null) {
       termView.onScreenUpdated()
+      // Keep a co-operating on-screen keyboard in sync with the live terminal
+      // colors (e.g. when a program changes the background via an OSC escape).
+      termView.onTerminalColorsChanged()
     }
   }
 }

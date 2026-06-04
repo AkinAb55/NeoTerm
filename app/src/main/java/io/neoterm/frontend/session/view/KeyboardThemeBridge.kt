@@ -31,16 +31,17 @@ object KeyboardThemeBridge {
    * keyboard is themed from the very first input session.
    */
   @JvmStatic
-  fun applyTo(outAttrs: EditorInfo, emulator: TerminalEmulator?) {
+  fun applyTo(outAttrs: EditorInfo, emulator: TerminalEmulator?): IntArray? {
     val colors = resolveColors(emulator) ?: run {
       Log.d(TAG, "applyTo: no colors resolved (emulator=${emulator != null})")
-      return
+      return null
     }
     val extras = outAttrs.extras ?: Bundle().also { outAttrs.extras = it }
     extras.putInt(EXTRA_BACKGROUND, colors[0])
     extras.putInt(EXTRA_FOREGROUND, colors[1])
     Log.d(TAG, "applyTo: wrote bg=#${Integer.toHexString(colors[0])} " +
       "fg=#${Integer.toHexString(colors[1])} (emulator=${emulator != null})")
+    return colors
   }
 
   /** Returns `[background, foreground]` as ARGB ints, or null if unavailable. */

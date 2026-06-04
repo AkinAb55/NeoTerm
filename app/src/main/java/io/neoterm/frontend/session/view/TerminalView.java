@@ -22,6 +22,7 @@ import android.view.accessibility.AccessibilityManager;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Scroller;
 import io.neoterm.R;
 import io.neoterm.backend.*;
@@ -38,6 +39,13 @@ public final class TerminalView extends View {
    * Log view key and IME events.
    */
   private static final boolean LOG_KEY_EVENTS = false;
+
+  /**
+   * The background/foreground colors last advertised to the on-screen keyboard
+   * (see {@link KeyboardThemeBridge}). Used to restart IME input only when the
+   * terminal's colors actually change, so the keyboard tracks the live terminal.
+   */
+  private int mLastImeBg = 0, mLastImeFg = 0;
 
   /**
    * The currently displayed terminal session, whose emulator is {@link #mEmulator}.
@@ -346,6 +354,26 @@ public final class TerminalView extends View {
     return true;
   }
 
+  /**
+   * Called when the terminal's colors change (OSC escape, color scheme applied,
+   * reset, …). If the background or foreground actually changed from what we
+   * last handed the on-screen keyboard, restart IME input so the keyboard
+   * re-reads the new colors and keeps matching the live terminal. May be called
+   * off the UI thread, so the restart is posted.
+   */
+  public void onTerminalColorsChanged() {
+    if (mEmulator == null) return;
+    int[] colors = mEmulator.mColors.mCurrentColors;
+    final int bg = colors[TextStyle.COLOR_INDEX_BACKGROUND];
+    final int fg = colors[TextStyle.COLOR_INDEX_FOREGROUND];
+    if (bg == mLastImeBg && fg == mLastImeFg) return;
+    post(() -> {
+      InputMethodManager imm =
+        (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+      if (imm != null) imm.restartInput(this);
+    });
+  }
+
   @Override
   public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
     // Using InputType.NULL is the most correct input type and avoids issues with other hacks.
@@ -371,7 +399,11 @@ public final class TerminalView extends View {
     // is themed from the very first input session even before the emulator has
     // attached, because the bridge falls back to the user's configured color
     // scheme. See KeyboardThemeBridge.
-    KeyboardThemeBridge.applyTo(outAttrs, mEmulator);
+    int[] advertised = KeyboardThemeBridge.applyTo(outAttrs, mEmulator);
+    if (advertised != null) {
+      mLastImeBg = advertised[0];
+      mLastImeFg = advertised[1];
+    }
 
     return new BaseInputConnection(this, true) {
       @Override

@@ -31,6 +31,7 @@ open class BasicSessionCallback(var terminalView: TerminalView) : TerminalSessio
   override fun onColorsChanged(session: TerminalSession?) {
     if (session != null) {
       terminalView.onScreenUpdated()
+      terminalView.onTerminalColorsChanged()
     }
   }
 }
