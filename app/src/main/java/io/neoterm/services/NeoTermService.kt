@@ -73,13 +73,7 @@ class NeoTermService : Service() {
       ACTION_SERVICE_STOP -> {
         for (i in mTerminalSessions.indices)
           mTerminalSessions[i].finishIfRunning()
-        // Finish the activity and drop its task too: otherwise the still-bound
-        // (or recents-resident) activity re-creates this service right after
-        // Exit, so the notification comes back with no session. onDestroy
-        // unbinds/stops the embedded X11 server process.
-        NeoTermActivity.getInstance()?.finishAndRemoveTask()
-        stopForeground(true)
-        stopSelf()
+        teardownAndStop()
       }
 
       ACTION_ACQUIRE_LOCK -> acquireLock(promptBatteryOpt = true)
@@ -149,6 +143,7 @@ class NeoTermService : Service() {
     if (indexOfRemoved >= 0) {
       mTerminalSessions.removeAt(indexOfRemoved)
       updateNotification()
+      stopSelfIfNoSessions()
     }
     return indexOfRemoved
   }
@@ -165,8 +160,33 @@ class NeoTermService : Service() {
     if (indexOfRemoved >= 0) {
       mXSessions.removeAt(indexOfRemoved)
       updateNotification()
+      stopSelfIfNoSessions()
     }
     return indexOfRemoved
+  }
+
+  /**
+   * Shut down once the user has closed the last session. This only runs on an
+   * actual removal (never at startup, where the list is empty before the first
+   * session is created), so the foreground service — and its notification —
+   * doesn't linger (or get re-spawned) with zero sessions.
+   */
+  private fun stopSelfIfNoSessions() {
+    if (mTerminalSessions.isEmpty() && mXSessions.isEmpty()) {
+      teardownAndStop()
+    }
+  }
+
+  /**
+   * Fully stop: finish the activity and drop its task (so the still-bound or
+   * recents-resident activity can't re-create this service), remove the
+   * foreground notification, then stop. onDestroy unbinds/stops the embedded
+   * X11 server process.
+   */
+  private fun teardownAndStop() {
+    NeoTermActivity.getInstance()?.finishAndRemoveTask()
+    stopForeground(true)
+    stopSelf()
   }
 
   private fun createOrFindSession(parameter: ShellParameter): TerminalSession {
