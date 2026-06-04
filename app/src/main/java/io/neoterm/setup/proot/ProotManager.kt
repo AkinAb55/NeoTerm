@@ -83,6 +83,33 @@ object ProotManager {
   }
 
   /**
+   * A disztróban beállított locale (LANG), amit a guest shell kapjon. Mivel a
+   * környezetet `env -i`-vel építjük, a LANG-ot sehonnan nem örökli, és a PAM
+   * (ami valódi loginnál a /etc/default/locale-t olvassa) sem fut le — ezért mi
+   * olvassuk ki a disztró saját konfigjából:
+   *  - Debian/Ubuntu/Kali: /etc/default/locale
+   *  - Arch:               /etc/locale.conf
+   * Az első nemüres `LANG=...` sort használjuk; ha nincs, C.UTF-8 a fallback.
+   */
+  private fun guestLang(distro: Distro = selectedDistro()): String {
+    val rootfs = distro.rootfsPath()
+    for (path in listOf("$rootfs/etc/default/locale", "$rootfs/etc/locale.conf")) {
+      val f = File(path)
+      if (!f.isFile) continue
+      val lang = runCatching {
+        f.readLines()
+          .map { it.trim().removePrefix("export ").trim() }
+          .firstOrNull { it.startsWith("LANG=") }
+          ?.substringAfter("LANG=")
+          ?.trim()
+          ?.trim('"', '\'')
+      }.getOrNull()
+      if (!lang.isNullOrEmpty()) return lang
+    }
+    return "C.UTF-8"
+  }
+
+  /**
    * Csak azokat az archokat támogatjuk, amikhez van proot bináris: a beépített
    * libproot.so (arm64) vagy a letölthető aarch64. Más archon (armeabi-v7a,
    * x86_64) nincs proot, ezért a setup értelmes hibát ad vissza, nem 404-et.
@@ -175,7 +202,10 @@ object ProotManager {
     args.add("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     args.add("TERM=xterm-256color")
     args.add("COLORTERM=truecolor")
-    args.add("LANG=C.UTF-8")
+    // Honor the distro's configured locale instead of forcing C.UTF-8: we build
+    // the guest env with `env -i`, so nothing inherits LANG and PAM (which reads
+    // /etc/default/locale on a real login) never runs. Read it ourselves.
+    args.add("LANG=${guestLang(distro)}")
     args.add("PS1=\\u@neoterm:\\w\\$ ")
     args.add("TMPDIR=/tmp")
     // Export the login shell so GUI terminals (xterm) launched under X11 start
