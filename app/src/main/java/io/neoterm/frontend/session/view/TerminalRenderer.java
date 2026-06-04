@@ -202,11 +202,15 @@ final class TerminalRenderer {
       int visibleFrom = Math.max(startRow, topRow);
       int visibleTo = Math.min(logicalEnd, endRow - 1);
       for (int r = visibleFrom; r <= visibleTo; r++) {
+        TerminalRow lineObj = screen.allocateFullLineIfNecessary(screen.externalToInternalRow(r));
         boolean[] rowMask = new boolean[columns];
         int base = (r - startRow) * columns;
         boolean any = false;
         for (int c = 0; c < columns; c++) {
-          if (base + c < flat.length && flat[base + c]) {
+          // A cell is "tappable" (underlined) if it's in a regex-matched URL or
+          // carries an OSC 8 hyperlink.
+          boolean on = (base + c < flat.length && flat[base + c]) || lineObj.getHyperlink(c) != null;
+          if (on) {
             rowMask[c] = true;
             any = true;
           }
