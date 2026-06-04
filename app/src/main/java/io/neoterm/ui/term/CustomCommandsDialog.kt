@@ -5,18 +5,25 @@ import android.text.InputType
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
+import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import io.neoterm.R
 import io.neoterm.utils.CustomCommands
+import java.util.Collections
 
 /**
  * The "CC" (custom commands) manager, opened from the terminal's text-selection
- * bar. Lets the user add / edit / delete / reorder named shell commands, and run
- * a chosen one either in the current session or in a freshly opened one.
+ * bar. Lets the user add / edit / delete and reorder named shell commands, and
+ * run one either in the current session (→) or in a freshly opened one (⇉).
+ *
+ * Reordering is by long-press + drag (ItemTouchHelper). Tapping a name edits it.
  *
  * @param runInCurrent runs the command line in the active session
  * @param runInNew     opens a new session that runs the command line
@@ -27,7 +34,8 @@ class CustomCommandsDialog(
   private val runInNew: (String) -> Unit
 ) {
   private val commands = CustomCommands.load(context)
-  private lateinit var listContainer: LinearLayout
+  private val adapter = Adapter()
+  private lateinit var emptyHint: TextView
   private var mainDialog: AlertDialog? = null
 
   private fun dp(v: Int) = TypedValue.applyDimension(
@@ -35,20 +43,36 @@ class CustomCommandsDialog(
   ).toInt()
 
   fun show() {
-    listContainer = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-    val scroll = ScrollView(context).apply {
-      addView(listContainer)
-      setPadding(dp(8), dp(4), dp(8), dp(4))
+    emptyHint = TextView(context).apply {
+      setText(R.string.cc_empty)
+      setPadding(dp(8), dp(16), dp(8), dp(16))
     }
-    rebuild()
+    // Cap the list height so long lists scroll instead of overflowing the dialog.
+    val recycler = object : RecyclerView(context) {
+      override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        val maxH = (resources.displayMetrics.heightPixels * 0.6f).toInt()
+        super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(maxH, MeasureSpec.AT_MOST))
+      }
+    }.apply {
+      layoutManager = LinearLayoutManager(context)
+      this.adapter = this@CustomCommandsDialog.adapter
+    }
+    ItemTouchHelper(DragCallback()).attachToRecyclerView(recycler)
+
+    val container = LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dp(8), dp(4), dp(8), dp(4))
+      addView(emptyHint)
+      addView(recycler)
+    }
+    updateEmpty()
 
     val dialog = AlertDialog.Builder(context)
       .setTitle(R.string.custom_commands)
-      .setView(scroll)
-      // Keep the manager open after Add (the click listener is overridden below
-      // so the dialog isn't auto-dismissed).
+      // Keep the manager open after Add (listener overridden below).
       .setNeutralButton(R.string.cc_add, null)
       .setNegativeButton(R.string.cc_close, null)
+      .setView(container)
       .create()
     dialog.setOnShowListener {
       dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { editOrAdd(null) }
@@ -57,77 +81,111 @@ class CustomCommandsDialog(
     dialog.show()
   }
 
-  private fun rebuild() {
-    listContainer.removeAllViews()
-    if (commands.isEmpty()) {
-      listContainer.addView(TextView(context).apply {
-        setText(R.string.cc_empty)
-        setPadding(dp(8), dp(16), dp(8), dp(16))
-      })
-      return
-    }
-    commands.forEachIndexed { i, c -> addRow(c, i) }
+  private fun updateEmpty() {
+    emptyHint.visibility = if (commands.isEmpty()) View.VISIBLE else View.GONE
   }
 
-  private fun addRow(cmd: CustomCommands.Cmd, index: Int) {
-    val row = LinearLayout(context).apply {
-      orientation = LinearLayout.HORIZONTAL
-      gravity = Gravity.CENTER_VERTICAL
-    }
-    val name = TextView(context).apply {
-      text = cmd.name
-      textSize = 16f
-      isSingleLine = true
-      ellipsize = TextUtils.TruncateAt.END
-      setPadding(dp(4), dp(10), dp(8), dp(10))
-      isClickable = true
-      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-      setOnClickListener { chooseRunTarget(cmd) }
-    }
-    row.addView(name)
-    row.addView(iconButton("↑") { move(index, -1) })  // ↑
-    row.addView(iconButton("↓") { move(index, +1) })  // ↓
-    row.addView(iconButton("✎") { editOrAdd(cmd) })   // ✎
-    row.addView(iconButton("✕") {                      // ✕
-      commands.removeAt(index)
-      persistAndRebuild()
-    })
-    listContainer.addView(row)
-  }
-
-  private fun iconButton(glyph: String, onClick: () -> Unit) = TextView(context).apply {
-    text = glyph
-    textSize = 18f
+  private fun glyph(text: String, desc: Int): TextView = TextView(context).apply {
+    this.text = text
+    contentDescription = context.getString(desc)
+    textSize = 20f
     gravity = Gravity.CENTER
-    minWidth = dp(40)
+    minWidth = dp(44)
     setPadding(dp(6), dp(10), dp(6), dp(10))
     isClickable = true
-    setOnClickListener { onClick() }
   }
 
-  private fun move(index: Int, delta: Int) {
-    val target = index + delta
-    if (target in commands.indices) {
-      val tmp = commands[index]
-      commands[index] = commands[target]
-      commands[target] = tmp
-      persistAndRebuild()
-    }
+  private inner class VH(row: LinearLayout) : RecyclerView.ViewHolder(row) {
+    val name: TextView = row.getChildAt(0) as TextView
+    val runCur: TextView = row.getChildAt(1) as TextView
+    val runNew: TextView = row.getChildAt(2) as TextView
+    val delete: TextView = row.getChildAt(3) as TextView
   }
 
-  private fun chooseRunTarget(cmd: CustomCommands.Cmd) {
-    val items = arrayOf(
-      context.getString(R.string.cc_run_current),
-      context.getString(R.string.cc_run_new)
-    )
-    AlertDialog.Builder(context)
-      .setTitle(cmd.name)
-      .setItems(items) { _, which ->
-        if (which == 0) runInCurrent(cmd.command) else runInNew(cmd.command)
-        mainDialog?.dismiss()
+  private inner class Adapter : RecyclerView.Adapter<VH>() {
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+      val name = TextView(context).apply {
+        textSize = 16f
+        isSingleLine = true
+        ellipsize = TextUtils.TruncateAt.END
+        setPadding(dp(4), dp(12), dp(8), dp(12))
+        isClickable = true
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
       }
-      .setNegativeButton(R.string.cc_close, null)
-      .show()
+      val row = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        layoutParams = RecyclerView.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        addView(name)
+        addView(glyph("→", R.string.cc_run_current))
+        addView(glyph("⇉", R.string.cc_run_new))
+        addView(glyph("✕", R.string.cc_delete))
+      }
+      return VH(row)
+    }
+
+    override fun onBindViewHolder(holder: VH, position: Int) {
+      val cmd = commands[position]
+      holder.name.text = cmd.name
+      // Tap the name to edit; long-press anywhere on the row starts the drag.
+      holder.name.setOnClickListener {
+        val p = holder.adapterPosition
+        if (p != RecyclerView.NO_POSITION) editOrAdd(commands[p])
+      }
+      holder.runCur.setOnClickListener {
+        val p = holder.adapterPosition
+        if (p != RecyclerView.NO_POSITION) {
+          runInCurrent(commands[p].command)
+          mainDialog?.dismiss()
+        }
+      }
+      holder.runNew.setOnClickListener {
+        val p = holder.adapterPosition
+        if (p != RecyclerView.NO_POSITION) {
+          runInNew(commands[p].command)
+          mainDialog?.dismiss()
+        }
+      }
+      holder.delete.setOnClickListener {
+        val p = holder.adapterPosition
+        if (p != RecyclerView.NO_POSITION) {
+          commands.removeAt(p)
+          notifyItemRemoved(p)
+          CustomCommands.save(context, commands)
+          updateEmpty()
+        }
+      }
+    }
+
+    override fun getItemCount() = commands.size
+  }
+
+  private inner class DragCallback : ItemTouchHelper.SimpleCallback(
+    ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0
+  ) {
+    override fun onMove(
+      recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder,
+      target: RecyclerView.ViewHolder
+    ): Boolean {
+      val from = viewHolder.adapterPosition
+      val to = target.adapterPosition
+      if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
+      Collections.swap(commands, from, to)
+      adapter.notifyItemMoved(from, to)
+      return true
+    }
+
+    override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
+
+    override fun isLongPressDragEnabled() = true
+
+    override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
+      super.clearView(recyclerView, viewHolder)
+      // Persist the new order once the drag settles.
+      CustomCommands.save(context, commands)
+    }
   }
 
   private fun editOrAdd(existing: CustomCommands.Cmd?) {
@@ -156,18 +214,17 @@ class CustomCommandsDialog(
         val name = nameEdit.text.toString().trim().ifEmpty { command }
         if (existing == null) {
           commands.add(CustomCommands.Cmd(name, command))
+          adapter.notifyItemInserted(commands.size - 1)
         } else {
           existing.name = name
           existing.command = command
+          val idx = commands.indexOf(existing)
+          if (idx >= 0) adapter.notifyItemChanged(idx)
         }
-        persistAndRebuild()
+        CustomCommands.save(context, commands)
+        updateEmpty()
       }
       .setNegativeButton(android.R.string.cancel, null)
       .show()
-  }
-
-  private fun persistAndRebuild() {
-    CustomCommands.save(context, commands)
-    rebuild()
   }
 }
