@@ -50,9 +50,12 @@ orig = s
 # --- helper: fetch a device fd from NeoTerm over the abstract unix socket ---
 helper = r'''
 /* === NeoTerm: fetch a USB device fd over the abstract unix socket === */
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <stddef.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <stddef.h>
 static int neoterm_usb_fd(const char *path)
 {
 	int s = socket(AF_UNIX, SOCK_STREAM, 0);
