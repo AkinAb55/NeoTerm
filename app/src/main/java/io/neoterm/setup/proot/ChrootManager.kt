@@ -39,12 +39,17 @@ object ChrootManager {
     val ext = System.getenv("EXTERNAL_STORAGE") ?: ""
 
     // What to exec inside the chroot. For an interactive session use the distro's
-    // own su (proper login + controlling terminal -> job control). For a one-shot
-    // package command, a plain bash -c is enough. "$CH" is the resolved host
-    // chroot binary (the guest PATH we export below would otherwise hide
+    // own su (proper login + controlling terminal -> job control); with no flag
+    // it picks the login shell from /etc/passwd (/bin/bash), overrides only
+    // HOME/SHELL/USER/PATH and keeps the rest of our env (DISPLAY/LANG/TERM). We
+    // pass NEITHER -p NOR - : -p would preserve the host SHELL=/system/bin/sh
+    // (which the guest su would then fail to exec inside the chroot), and - would
+    // reset the environment and drop our DISPLAY=:0. For a one-shot package
+    // command, a plain bash -c is enough. "$CH" is the resolved host chroot
+    // binary (the guest PATH we export below would otherwise hide
     // /system/bin/chroot).
     val inChroot = if (command.isEmpty()) {
-      "exec \"\$CH\" \"\$R\" /bin/su -p"
+      "exec \"\$CH\" \"\$R\" /bin/su"
     } else {
       "exec \"\$CH\" \"\$R\" /bin/bash -c ${sq(command.joinToString(" "))}"
     }
