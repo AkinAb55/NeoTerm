@@ -38,18 +38,27 @@ object ChrootManager {
     File(x11Sock).apply { mkdirs() }
     val ext = System.getenv("EXTERNAL_STORAGE") ?: ""
 
-    // What to exec inside the chroot. For an interactive session use the distro's
-    // own su (proper login + controlling terminal -> job control); with no flag
-    // it picks the login shell from /etc/passwd (/bin/bash), overrides only
-    // HOME/SHELL/USER/PATH and keeps the rest of our env (DISPLAY/LANG/TERM). We
-    // pass NEITHER -p NOR - : -p would preserve the host SHELL=/system/bin/sh
-    // (which the guest su would then fail to exec inside the chroot), and - would
-    // reset the environment and drop our DISPLAY=:0. For a one-shot package
-    // command, a plain bash -c is enough. "$CH" is the resolved host chroot
-    // binary (the guest PATH we export below would otherwise hide
-    // /system/bin/chroot).
+    // What to exec inside the chroot.
+    //
+    // Interactive: we must give the guest shell its own session WITH a controlling
+    // terminal, otherwise it isn't the foreground process group and Ctrl+C kills
+    // the whole pipeline instead of the foreground job. The host su (Magisk -mm)
+    // forks rather than execs, so the shell would not be the session leader on its
+    // own. So inside the chroot we run `setsid -w --ctty <shell> -l`: setsid makes
+    // a new session + sets the tty as its controlling terminal, `-w` keeps the
+    // chain alive until the shell exits (else the host su would return early and
+    // SIGHUP the shell), and `-l` makes it a login shell (proper /root cwd +
+    // profile). The guest's setsid is util-linux and supports --ctty (the earlier
+    // breakage was the host toybox setsid, which does not). We cd to $HOME first so
+    // the login shell starts in /root.
+    //
+    // One-shot package command: a plain bash -c is enough (no job control needed).
+    //
+    // "$CH" is the resolved host chroot binary (the guest PATH we export below
+    // would otherwise hide /system/bin/chroot).
+    val shell = loginShell ?: "/bin/bash"
     val inChroot = if (command.isEmpty()) {
-      "exec \"\$CH\" \"\$R\" /bin/su"
+      "exec \"\$CH\" \"\$R\" /bin/bash -c 'cd \"\$HOME\" 2>/dev/null; if command -v setsid >/dev/null 2>&1; then exec setsid -w --ctty $shell -l; else exec $shell -l; fi'"
     } else {
       "exec \"\$CH\" \"\$R\" /bin/bash -c ${sq(command.joinToString(" "))}"
     }
