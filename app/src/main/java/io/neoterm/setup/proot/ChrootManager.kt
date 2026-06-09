@@ -162,7 +162,7 @@ object ChrootManager {
    * Write the bash rc file inside the rootfs. With `bash --rcfile <file> -i` bash
    * reads ONLY this file (instead of /etc/bash.bashrc + ~/.bashrc), so we source
    * the standard startup files ourselves, in login order: /etc/profile (login
-   * env + /etc/profile.d/*), /etc/bash.bashrc (system interactive rc), then
+   * env + /etc/profile.d scripts), /etc/bash.bashrc (system interactive rc), then
    * ~/.bashrc (user rc — PATH additions like ~/.local/bin, aliases, prompt).
    * Idempotent: overwritten on every launch.
    */
