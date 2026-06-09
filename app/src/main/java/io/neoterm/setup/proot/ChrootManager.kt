@@ -100,6 +100,9 @@ object ChrootManager {
       // Guest environment (no PULSE_* — audio is direct in chroot).
       append("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
       append("export TERM=xterm-256color HOME=/root TMPDIR=/tmp USER=root LOGNAME=root\n")
+      // Set SHELL to the guest shell; otherwise the host /system/bin/sh leaks in
+      // (echo $SHELL) and GUI terminals would start the wrong shell.
+      append("export SHELL=").append(sq(shell)).append('\n')
       append("export LANG=").append(sq(lang)).append('\n')
       append("export DISPLAY=:0 XDG_RUNTIME_DIR=/tmp\n")
       append("export MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1\n")
