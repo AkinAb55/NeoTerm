@@ -97,8 +97,27 @@ object UsbBridge {
     synchronized(connections) {
       if (connections.containsKey(device.deviceName)) return
       runCatching { usb.openDevice(device) }.getOrNull()?.let {
+        detachKernelDrivers(device, it)
         connections[device.deviceName] = it
       }
+    }
+  }
+
+  /**
+   * Force-detach the Android kernel driver from every interface as soon as the
+   * device is opened. Mass-storage devices are grabbed by the kernel's
+   * usb-storage driver (auto-mount), so a later libusb claim from the distro
+   * fails with LIBUSB_ERROR_BUSY (-6). [UsbDeviceConnection.claimInterface] with
+   * force=true issues USBDEVFS_DISCONNECT (detach the kernel driver) + claim on
+   * the connection's fd; because we serve a dup of that same fd, the interface
+   * stays free for the guest libusb. We keep the claim so the driver can't
+   * re-grab it. Done for every interface whether or not a driver is attached.
+   */
+  private fun detachKernelDrivers(device: UsbDevice, conn: UsbDeviceConnection) {
+    for (i in 0 until device.interfaceCount) {
+      val iface = device.getInterface(i)
+      val ok = runCatching { conn.claimInterface(iface, true) }.getOrDefault(false)
+      NLog.e("UsbBridge", "detach/claim iface ${iface.id} on ${device.deviceName}: $ok")
     }
   }
 
