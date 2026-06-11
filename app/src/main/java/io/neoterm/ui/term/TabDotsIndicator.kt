@@ -37,10 +37,13 @@ class TabDotsIndicator @JvmOverloads constructor(
 
   /** Updates the dot count and the selected index, hiding the strip for 0/1 tabs. */
   fun setTabs(count: Int, selected: Int) {
+    val countChanged = this.count != count
     this.count = count
     this.selected = selected
     // A single tab needs no indicator.
     visibility = if (count > 1) VISIBLE else GONE
+    // The measured width depends on the dot count, so re-layout when it changes.
+    if (countChanged) requestLayout()
     invalidate()
   }
 
@@ -56,8 +59,15 @@ class TabDotsIndicator @JvmOverloads constructor(
 
   override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
     val height = (activeDotRadius * 2 + 8f * density).toInt()
+    // Width follows the dot count (so wrap_content is compact in the app bar)
+    // instead of grabbing the whole available width.
+    val desiredWidth = if (count > 1) {
+      (preferredSpacing * (count - 1) + activeDotRadius * 2 + paddingLeft + paddingRight).toInt()
+    } else {
+      suggestedMinimumWidth + paddingLeft + paddingRight
+    }
     setMeasuredDimension(
-      getDefaultSize(suggestedMinimumWidth, widthMeasureSpec),
+      resolveSize(desiredWidth, widthMeasureSpec),
       resolveSize(height, heightMeasureSpec)
     )
   }

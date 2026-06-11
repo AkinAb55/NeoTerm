@@ -124,7 +124,7 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       }
     })
 
-    tabDots = findViewById(R.id.tab_dots)
+    // tabDots is bound later from the app-bar action view (onCreateOptionsMenu).
 
     tabSwitcher = findViewById(R.id.tab_switcher)
     // Don't let the switcher persist tabs into instance state: restored tabs
@@ -234,18 +234,14 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
   override fun onCreateOptionsMenu(menu: Menu?): Boolean {
     menuInflater.inflate(R.menu.menu_main, menu)
 
-    TabSwitcher.setupWithMenu(tabSwitcher, toolbar.menu, {
-      if (!tabSwitcher.isSwitcherShown) {
-        val imm = this@NeoTermActivity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        if (imm.isActive && tabSwitcher.selectedTab is TermTab) {
-          val tab = tabSwitcher.selectedTab as TermTab
-          tab.requireHideIme()
-        }
-        toggleSwitcher(showSwitcher = true, easterEgg = true)
-      } else {
-        toggleSwitcher(showSwitcher = false, easterEgg = true)
-      }
-    })
+    // The old tab-count button is replaced by a page-indicator (dots) action
+    // view in the app bar — just shows which tab is active, no overview popup.
+    val dotsView = menu?.findItem(R.id.toggle_tab_switcher_menu_item)?.actionView
+      ?.findViewById<TabDotsIndicator>(R.id.toolbar_tab_dots)
+    if (dotsView != null) {
+      tabDots = dotsView
+      updateTabDots()
+    }
     return true
   }
 
@@ -548,8 +544,9 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       tabDots.visibility = View.GONE
       return
     }
+    // Dots live in the (terminal-colored) app bar, so colour them from the
+    // terminal foreground; the toolbar provides the background.
     tabDots.setBaseColor(currentTerminalForegroundColor())
-    tabDots.setBackgroundColor(currentTerminalBackgroundColor())
     tabDots.setTabs(tabSwitcher.count, tabSwitcher.selectedTabIndex)
   }
 

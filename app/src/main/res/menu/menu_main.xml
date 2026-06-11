@@ -5,8 +5,8 @@
   <item
     android:id="@+id/toggle_tab_switcher_menu_item"
     android:title="@string/toggle_tab_switcher_menu_item"
-    app:actionLayout="@layout/tab_switcher_menu_item"
-    app:showAsAction="ifRoom"/>
+    app:actionLayout="@layout/tab_dots_action"
+    app:showAsAction="always"/>
 
   <item
     android:id="@+id/menu_item_new_session"
