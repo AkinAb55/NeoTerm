@@ -32,6 +32,7 @@
   <string name="toggle_tab_switcher_menu_item">Toggle Tabs</string>
   <string name="new_session">New Session</string>
   <string name="new_session_more">New Session…</string>
+  <string name="close_current_tab">Close current tab</string>
   <string name="new_system_session">New System Shell</string>
   <string name="service_status_text">%d session(s), %d X session(s)</string>
   <string name="service_x11_running"> • X11 :0</string>

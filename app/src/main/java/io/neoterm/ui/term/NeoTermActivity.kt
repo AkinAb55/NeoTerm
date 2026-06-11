@@ -259,6 +259,11 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         addNewSession()
         true
       }
+      R.id.menu_item_close_session -> {
+        // Close the active tab (its session is cleaned up via onTabRemoved).
+        tabSwitcher.selectedTab?.let { tabSwitcher.removeTab(it) }
+        true
+      }
       R.id.menu_item_new_session_with_profile -> {
         showProfileDialog()
         true

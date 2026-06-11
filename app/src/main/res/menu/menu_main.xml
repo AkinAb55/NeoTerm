@@ -14,6 +14,11 @@
     app:showAsAction="never"/>
 
   <item
+    android:id="@+id/menu_item_close_session"
+    android:title="@string/close_current_tab"
+    app:showAsAction="never"/>
+
+  <item
     android:title="@string/new_session_more"
     app:showAsAction="never">
     <menu>
