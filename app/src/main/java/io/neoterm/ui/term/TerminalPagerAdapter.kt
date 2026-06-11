@@ -45,13 +45,27 @@ import io.neoterm.utils.Terminals
  * current virtual position when it drifts toward the ends (see
  * NeoTermActivity.recenterIfNeeded).
  *
- * For <= 2 real tabs we keep the simple finite adapter: the count is the real
- * count and `position == realIndex`. Wrapping is meaningless with 1 tab, and
- * with exactly 2 tabs an infinite modulo adapter would lay out the SAME session
- * at both neighbours of any page (current-1 and current+1 both map to the other
- * single tab) — two live [TerminalView]s bound to one session steals the
- * session's view and blanks it. So we only enable looping once both neighbours
- * are guaranteed to be DISTINCT real tabs (realCount >= 3).
+ * For 1 real tab we keep the simple finite adapter: the count is the real count
+ * and `position == realIndex`. Wrapping is meaningless with a single tab.
+ *
+ * ## The 2-tab wrap special case
+ * With exactly 2 real tabs we DO loop (so swiping either direction from A goes to
+ * B and vice-versa, endlessly), but an infinite modulo adapter would lay out the
+ * SAME session at both neighbours of any page (current-1 and current+1 both map
+ * to the other single tab). Two live [TerminalView]s bound to one session steals
+ * the session's view (termData.termView points at the last-bound view) and blanks
+ * the off-screen duplicate.
+ *
+ * We make this robust two ways:
+ *   1. The ACTIVITY sets `offscreenPageLimit = OFFSCREEN_PAGE_LIMIT_DEFAULT` while
+ *      realCount == 2 (and `1` for realCount >= 3). With the default limit the
+ *      pager only lays out the page you are dragging TOWARD — one neighbour at a
+ *      time — so the same session is never bound to two live views permanently.
+ *   2. Whenever a page becomes the current one (onPageSelected) and when a swipe
+ *      settles (IDLE), the activity calls [rebindCurrent], which re-runs the bind
+ *      for the on-screen holder. That guarantees the visible page's session is
+ *      (re)attached to the live on-screen view, so even during the brief transient
+ *      of a reversed drag the active terminal is never left blank.
  *
  * Stable ids are intentionally NOT used: in infinite mode the same session
  * appears at many virtual positions, which violates RecyclerView's "unique id
@@ -68,8 +82,13 @@ class TerminalPagerAdapter(
     private const val VIEW_TYPE_TERM = 0
     private const val VIEW_TYPE_X = 1
 
-    /** Looping kicks in only when both pager neighbours are distinct sessions. */
-    const val MIN_LOOP_TABS = 3
+    /**
+     * Looping is enabled from 2 real tabs upward (1 tab stays finite). For
+     * realCount == 2 both pager neighbours map to the same session; the activity
+     * compensates with offscreenPageLimit = DEFAULT plus [rebindCurrent] so the
+     * visible page is always live (see the class kdoc).
+     */
+    const val MIN_LOOP_TABS = 2
 
     /** Virtual item count in infinite mode (kept even so the middle is a clean
      *  multiple of realCount; large enough the user never reaches an end). */
@@ -77,6 +96,49 @@ class TerminalPagerAdapter(
   }
 
   class PageHolder(val root: View) : RecyclerView.ViewHolder(root)
+
+  /**
+   * The RecyclerView that ViewPager2 drives internally. Captured so
+   * [rebindCurrent] can locate the live on-screen holder by position and re-bind
+   * it (re-attaching its session to the visible view). Set in
+   * [onAttachedToRecyclerView]; cleared in [onDetachedFromRecyclerView].
+   */
+  private var recyclerView: RecyclerView? = null
+
+  override fun onAttachedToRecyclerView(rv: RecyclerView) {
+    super.onAttachedToRecyclerView(rv)
+    recyclerView = rv
+  }
+
+  override fun onDetachedFromRecyclerView(rv: RecyclerView) {
+    super.onDetachedFromRecyclerView(rv)
+    if (recyclerView === rv) recyclerView = null
+  }
+
+  /**
+   * Re-bind the holder currently shown at virtual [position] so its session is
+   * (re)attached to the live on-screen view. This is the safety net for the
+   * 2-tab wrap case: when a holder elsewhere transiently binds the same session
+   * (a reversed drag lays out the same single "other" tab on both sides), the
+   * session's termData.termView can be left pointing at an off-screen view. Re-
+   * binding the visible holder re-points it at the on-screen view so the active
+   * terminal is never blank.
+   *
+   * We bind the existing holder directly rather than notifyItemChanged(position):
+   * in looping mode notifyItemChanged on a single virtual position is fragile
+   * (the same real tab lives at many positions) and can fight ViewPager2's own
+   * RecyclerView pre-layout. Re-running our idempotent bind on the live holder is
+   * safe and side-effect free.
+   */
+  fun rebindCurrent(position: Int) {
+    val rv = recyclerView ?: return
+    val holder = rv.findViewHolderForAdapterPosition(position) as? PageHolder ?: return
+    if (realCount == 0) return
+    when (val tab = tabs[realIndex(position)]) {
+      is TermTab -> bindTerminalPage(holder, tab)
+      is XSessionTab -> bindXPage(holder, tab)
+    }
+  }
 
   /** Number of real tabs (the model size). */
   val realCount: Int
@@ -247,10 +309,14 @@ class TerminalPagerAdapter(
     super.onViewRecycled(holder)
     // Terminal pages need no teardown here: binding is idempotent and the
     // session<->view link (termData.termView + TerminalView.attachSession) is
-    // re-established on the next bind. The double-bind guarantee comes from
-    // never laying out the same session twice at once: in infinite mode that
-    // holds because looping is only enabled for realCount >= 3, so the three
-    // laid-out pages (current +/- 1) always map to three DISTINCT real tabs.
+    // re-established on the next bind. Avoiding a permanent double-bind of one
+    // session to two live views depends on which neighbours are laid out:
+    //   - realCount >= 3: offscreenPageLimit = 1 lays out current +/- 1, which
+    //     always map to DISTINCT real tabs, so no two pages share a session.
+    //   - realCount == 2: offscreenPageLimit = DEFAULT, so only the page being
+    //     dragged toward is laid out (one neighbour at a time). The activity also
+    //     calls rebindCurrent() on select/IDLE so the visible page is re-attached
+    //     live even through a reversed-drag transient.
     //
     // Detach the X GL view from a recycled page so it can be re-parented onto the
     // page it gets re-bound to (the GL surface is a single live instance).
