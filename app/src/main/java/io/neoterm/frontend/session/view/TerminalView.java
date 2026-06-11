@@ -881,13 +881,13 @@ public final class TerminalView extends View {
 
   /**
    * Decide whether a finished horizontal drag pages to an adjacent tab. It commits
-   * only on a deliberate drag of at least half the screen width, so accidental
+   * only on a deliberate drag of about a third of the screen width, so accidental
    * sideways movement never switches tabs. The content always animates back to
    * rest; on a commit the tab switch swaps in the new session underneath.
    */
   private void finalizeTabSwipe() {
     final float w = Math.max(1, getWidth());
-    final boolean doSwitch = mClient != null && Math.abs(mSwipeTotalX) >= w * 0.5f;
+    final boolean doSwitch = mClient != null && Math.abs(mSwipeTotalX) >= w * 0.33f;
 
     mTabSwiping = false;
     mSwipeMode = SWIPE_UNDECIDED;
