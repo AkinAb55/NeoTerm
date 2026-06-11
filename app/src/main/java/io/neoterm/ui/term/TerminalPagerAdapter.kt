@@ -28,7 +28,7 @@ import io.neoterm.utils.Terminals
  *   - an X session        -> R.layout.ui_xorg (the SDL GL surface)
  *
  * The binding reuses exactly the same [TermSessionData]/[TermTab] wiring the old
- * [NeoTabDecorator] used, so a page is a fully live terminal — which (with
+ * TabSwitcher decorator used, so a page is a fully live terminal — which (with
  * offscreenPageLimit = 1) is what lets the user peek the neighbouring tab's real
  * content while dragging.
  *
