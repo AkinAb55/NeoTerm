@@ -44,9 +44,21 @@ final class TerminalRenderer {
 
   private final float[] asciiMeasures = new float[127];
 
-  /** Fallback typeface (carries the system font fallback chain) used to draw
-   *  glyphs the user-selected font lacks, so they don't render as tofu. */
-  private static final Typeface FALLBACK_TYPEFACE = Typeface.MONOSPACE;
+  /**
+   * Fallback typeface used to draw glyphs the user-selected font lacks, so they
+   * don't render as tofu. Installed at startup with the bundled broad-coverage
+   * symbol font (assets/symbol_fallback.ttf) via
+   * {@link #setFallbackTypeface(Typeface)}. Until then it degrades to the system
+   * MONOSPACE — whose fallback chain uses *subsetted* Noto symbol fonts that
+   * themselves omit many glyphs (e.g. the media-control triangles U+23F4..FA used
+   * by TUIs), which is exactly the tofu the bundled font fixes.
+   */
+  private static Typeface sFallbackTypeface = Typeface.MONOSPACE;
+
+  /** Install the bundled symbol fallback font (see {@link #sFallbackTypeface}). */
+  static void setFallbackTypeface(Typeface typeface) {
+    if (typeface != null) sFallbackTypeface = typeface;
+  }
   /** Per-code-point cache of whether the user font has the glyph (1) or needs
    *  the fallback (0); -1 = unknown. Keeps the per-frame check cheap. */
   private final android.util.SparseIntArray mGlyphCache = new android.util.SparseIntArray();
@@ -210,8 +222,8 @@ final class TerminalRenderer {
   /**
    * Whether the user-selected font can render {@code codePoint}. ASCII is always
    * present; other code points are probed once via {@link Paint#hasGlyph} and
-   * cached. When false, the run is drawn with {@link #FALLBACK_TYPEFACE} so the
-   * glyph falls back to a system font instead of rendering as tofu.
+   * cached. When false, the run is drawn with {@link #sFallbackTypeface} so the
+   * glyph falls back to the bundled symbol font instead of rendering as tofu.
    */
   private boolean fontHasGlyph(int codePoint) {
     if (codePoint < 0x80) return true;
@@ -392,6 +404,16 @@ final class TerminalRenderer {
       backColor = tmp;
     }
 
+    // For runs drawn with the fallback font, switch the typeface now and measure
+    // with it so the scale-to-fit below uses the fallback glyphs' real advances.
+    // (Measuring against the user font, whose glyph the run lacks, would mis-scale
+    // it.) The typeface is restored at the end of the method.
+    if (fallbackFont) {
+      mTextPaint.setTypeface(sFallbackTypeface);
+      float fallbackMeasured = mTextPaint.measureText(text, startCharIndex, runWidthChars);
+      if (fallbackMeasured > 0f) mes = fallbackMeasured;
+    }
+
     float left = startColumn * mFontWidth;
     float right = left + runWidthColumns * mFontWidth;
 
@@ -440,14 +462,13 @@ final class TerminalRenderer {
       mTextPaint.setStrikeThruText(strikeThrough);
       mTextPaint.setColor(foreColor);
 
-      // For glyphs the user font lacks, draw with the fallback typeface (which
-      // carries the system font fallback chain) so they aren't rendered as tofu.
-      if (fallbackFont) mTextPaint.setTypeface(FALLBACK_TYPEFACE);
-      // The text alignment is the default Paint.Align.LEFT.
+      // The text alignment is the default Paint.Align.LEFT. For fallback runs the
+      // typeface was switched (and the run measured) above; it is restored below so
+      // it is reset even for invisible runs.
       canvas.drawText(text, startCharIndex, runWidthChars, left, y - mFontLineSpacingAndAscent, mTextPaint);
-      if (fallbackFont) mTextPaint.setTypeface(mTypeface);
     }
 
+    if (fallbackFont) mTextPaint.setTypeface(mTypeface);
     if (savedMatrix) canvas.restore();
   }
 

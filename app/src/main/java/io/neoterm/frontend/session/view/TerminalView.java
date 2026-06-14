@@ -170,7 +170,33 @@ public final class TerminalView extends View {
     commonInit(context);
   }
 
+  /** Loaded once: the bundled broad-coverage symbol font used to draw glyphs the
+   *  user font (and the system's subsetted fallback) lack. {@code null} until the
+   *  first load attempt; the load is attempted only once. */
+  private static Typeface sFallbackTypeface;
+  private static boolean sFallbackLoaded = false;
+
+  /**
+   * Load assets/symbol_fallback.ttf (a subset of GNU Unifont covering the symbol,
+   * technical, box-drawing, arrow and dingbat blocks) once and hand it to
+   * {@link TerminalRenderer} as the tofu fallback. Android's own MONOSPACE
+   * fallback chain uses subsetted Noto symbol fonts that omit many of these
+   * glyphs, so without this a TUI's symbols (e.g. Claude's "⏵⏵" auto-accept
+   * marker) render as empty boxes.
+   */
+  private static void ensureFallbackTypeface(Context context) {
+    if (sFallbackLoaded) return;
+    sFallbackLoaded = true;
+    try {
+      sFallbackTypeface = Typeface.createFromAsset(context.getApplicationContext().getAssets(), "symbol_fallback.ttf");
+      TerminalRenderer.setFallbackTypeface(sFallbackTypeface);
+    } catch (Exception e) {
+      Log.w("NeoTerm", "Could not load symbol fallback font, using system MONOSPACE", e);
+    }
+  }
+
   private void commonInit(Context context) {
+    ensureFallbackTypeface(context);
     mGestureRecognizer = new GestureAndScaleRecognizer(context, new GestureAndScaleRecognizer.Listener() {
 
       private boolean scrolledWithFinger;
