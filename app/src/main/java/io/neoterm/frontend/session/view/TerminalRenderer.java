@@ -44,6 +44,13 @@ final class TerminalRenderer {
 
   private final float[] asciiMeasures = new float[127];
 
+  /** Fallback typeface (carries the system font fallback chain) used to draw
+   *  glyphs the user-selected font lacks, so they don't render as tofu. */
+  private static final Typeface FALLBACK_TYPEFACE = Typeface.MONOSPACE;
+  /** Per-code-point cache of whether the user font has the glyph (1) or needs
+   *  the fallback (0); -1 = unknown. Keeps the per-frame check cheap. */
+  private final android.util.SparseIntArray mGlyphCache = new android.util.SparseIntArray();
+
   // Reusable objects for drawing inline image (Sixel) cell tiles.
   private final Rect mImageSrc = new Rect();
   private final RectF mImageDst = new RectF();
@@ -115,6 +122,7 @@ final class TerminalRenderer {
       int lastRunStartColumn = -1;
       int lastRunStartIndex = 0;
       boolean lastRunFontWidthMismatch = false;
+      boolean lastRunMissingGlyph = false;
       int currentCharIndex = 0;
       float measuredWidthForRun = 0.f;
 
@@ -137,11 +145,20 @@ final class TerminalRenderer {
         // This could happen for some fonts which are not truly monospace, or for more exotic characters such as
         // smileys which android font renders as wide.
         // If this is detected, we draw this code point scaled to match what wcwidth() expects.
-        final float measuredCodePointWidth = (codePoint < asciiMeasures.length) ? asciiMeasures[codePoint] : mTextPaint.measureText(line,
-          currentCharIndex, charsForCodePoint);
+        // A custom (user) font has no system fallback chain, so glyphs it lacks
+        // would render as tofu/blank. Detect those and draw the run with a
+        // fallback typeface (which does fall back to the system fonts).
+        final boolean missingGlyph = codePointWcWidth > 0 && !fontHasGlyph(codePoint);
+        // For a present glyph use the real measured width (so non-monospace and
+        // wide glyphs are scaled to their cell); for a missing one the user font's
+        // measure is meaningless (often the .notdef/tofu advance, sometimes 0), so
+        // use the expected cell width — the real width comes from the fallback font.
+        final float measuredCodePointWidth = missingGlyph ? (codePointWcWidth * mFontWidth)
+          : (codePoint < asciiMeasures.length) ? asciiMeasures[codePoint]
+          : mTextPaint.measureText(line, currentCharIndex, charsForCodePoint);
         final boolean fontWidthMismatch = Math.abs(measuredCodePointWidth / mFontWidth - codePointWcWidth) > 0.01;
 
-        if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideUrl != lastRunUrl || fontWidthMismatch || lastRunFontWidthMismatch) {
+        if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideUrl != lastRunUrl || fontWidthMismatch || lastRunFontWidthMismatch || missingGlyph != lastRunMissingGlyph) {
           if (column == 0) {
             // Skip first column as there is nothing to draw, just record the current style.
           } else {
@@ -150,7 +167,7 @@ final class TerminalRenderer {
             int cursorColor = lastRunInsideCursor ? mEmulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] : 0;
             drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun,
               lastRunStartIndex, charsSinceLastRun, measuredWidthForRun,
-              cursorColor, cursorShape, lastRunStyle, reverseVideo, lastRunUrl);
+              cursorColor, cursorShape, lastRunStyle, reverseVideo, lastRunUrl, lastRunMissingGlyph);
           }
           measuredWidthForRun = 0.f;
           lastRunStyle = style;
@@ -159,6 +176,7 @@ final class TerminalRenderer {
           lastRunStartColumn = column;
           lastRunStartIndex = currentCharIndex;
           lastRunFontWidthMismatch = fontWidthMismatch;
+          lastRunMissingGlyph = missingGlyph;
         }
         measuredWidthForRun += measuredCodePointWidth;
         column += codePointWcWidth;
@@ -174,7 +192,7 @@ final class TerminalRenderer {
       final int charsSinceLastRun = currentCharIndex - lastRunStartIndex;
       int cursorColor = lastRunInsideCursor ? mEmulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] : 0;
       drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
-        measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo, lastRunUrl);
+        measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo, lastRunUrl, lastRunMissingGlyph);
 
       // Inline image (Sixel) cells: drawTextRun skips them, so draw their bitmap
       // tiles here over the (blank) cells. Only when images exist on screen.
@@ -189,6 +207,26 @@ final class TerminalRenderer {
    * points attached to the preceding cell) contains a VS16 (U+FE0F). Scans only
    * the run of zero-width code points, mirroring how the render loop eats them.
    */
+  /**
+   * Whether the user-selected font can render {@code codePoint}. ASCII is always
+   * present; other code points are probed once via {@link Paint#hasGlyph} and
+   * cached. When false, the run is drawn with {@link #FALLBACK_TYPEFACE} so the
+   * glyph falls back to a system font instead of rendering as tofu.
+   */
+  private boolean fontHasGlyph(int codePoint) {
+    if (codePoint < 0x80) return true;
+    int cached = mGlyphCache.get(codePoint, -1);
+    if (cached != -1) return cached == 1;
+    boolean has;
+    try {
+      has = mTextPaint.hasGlyph(new String(Character.toChars(codePoint)));
+    } catch (Exception e) {
+      has = true; // On any error, assume present (draw with the user font).
+    }
+    mGlyphCache.put(codePoint, has ? 1 : 0);
+    return has;
+  }
+
   private static boolean followedByVs16(char[] line, int index, int charsUsed) {
     int i = index;
     while (i < charsUsed && WcWidth.width(line, i) <= 0) {
@@ -322,7 +360,7 @@ final class TerminalRenderer {
 
   private void drawTextRun(Canvas canvas, char[] text, int[] palette, float y, int startColumn, int runWidthColumns,
                            int startCharIndex, int runWidthChars, float mes, int cursor, int cursorStyle,
-                           long textStyle, boolean reverseVideo, boolean forceUnderline) {
+                           long textStyle, boolean reverseVideo, boolean forceUnderline, boolean fallbackFont) {
     // Inline image cells are drawn separately (drawImageCells); skip them here so
     // their packed image id isn't misread as colours.
     if (TextStyle.isImage(textStyle)) return;
@@ -402,8 +440,12 @@ final class TerminalRenderer {
       mTextPaint.setStrikeThruText(strikeThrough);
       mTextPaint.setColor(foreColor);
 
+      // For glyphs the user font lacks, draw with the fallback typeface (which
+      // carries the system font fallback chain) so they aren't rendered as tofu.
+      if (fallbackFont) mTextPaint.setTypeface(FALLBACK_TYPEFACE);
       // The text alignment is the default Paint.Align.LEFT.
       canvas.drawText(text, startCharIndex, runWidthChars, left, y - mFontLineSpacingAndAscent, mTextPaint);
+      if (fallbackFont) mTextPaint.setTypeface(mTypeface);
     }
 
     if (savedMatrix) canvas.restore();
