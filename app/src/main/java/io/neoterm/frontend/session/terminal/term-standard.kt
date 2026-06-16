@@ -309,13 +309,13 @@ class TermViewClient(val context: Context) : TerminalViewClient {
   }
 
   private fun changeFontSize(increase: Boolean) {
-    val termView = termSessionData?.termView
-    if (termView != null) {
-      val changedSize = (if (increase) 1 else -1) * 2
-      val fontSize = NeoPreference.validateFontSize(termView.textSize + changedSize)
-      termView.textSize = fontSize
-      NeoPreference.store(NeoPreference.KEY_FONT_SIZE, fontSize)
-    }
+    val termView = termSessionData?.termView ?: return
+    val changedSize = (if (increase) 1 else -1) * 2
+    val fontSize = NeoPreference.validateFontSize(termView.textSize + changedSize)
+    NeoPreference.store(NeoPreference.KEY_FONT_SIZE, fontSize)
+    // Font size is a global preference: broadcast it so every open tab updates uniformly,
+    // not just the one that was pinch-zoomed / received the +/- key (handled by the activity).
+    org.greenrobot.eventbus.EventBus.getDefault().post(FontSizeChangedEvent(fontSize))
   }
 }
 

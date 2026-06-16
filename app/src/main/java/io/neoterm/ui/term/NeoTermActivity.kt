@@ -1312,6 +1312,14 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     imm.toggleSoftInput(InputMethodManager.SHOW_IMPLICIT, 0)
   }
 
+  @Suppress("unused")
+  @Subscribe(threadMode = ThreadMode.MAIN)
+  fun onFontSizeChangedEvent(event: FontSizeChangedEvent) {
+    // Font size is a global preference: apply it to every open terminal (including the one
+    // that triggered the change), so changing it in one tab keeps all tabs uniform.
+    forEachTab<TermTab> { it.termData.termView?.textSize = event.fontSize }
+  }
+
   @Suppress("unused", "UNUSED_PARAMETER")
   @Subscribe(threadMode = ThreadMode.MAIN)
   fun onTitleChangedEvent(titleChangedEvent: TitleChangedEvent) {

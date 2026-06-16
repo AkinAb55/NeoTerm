@@ -9,3 +9,4 @@ class TabCloseEvent(val termTab: TermTab)
 class TitleChangedEvent(val title: String)
 class ToggleFullScreenEvent
 class ToggleImeEvent
+class FontSizeChangedEvent(val fontSize: Int)
