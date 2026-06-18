@@ -326,6 +326,13 @@ object NeoPreference {
     return loadString(R.string.key_general_camera_resolution, DefaultValues.cameraResolution)
   }
 
+  fun isGpsEnabled(): Boolean {
+    return loadBoolean(
+      R.string.key_general_gps,
+      DefaultValues.enableGps
+    )
+  }
+
   fun isOscNotificationEnabled(): Boolean {
     return loadBoolean(
       R.string.key_general_osc_notification,

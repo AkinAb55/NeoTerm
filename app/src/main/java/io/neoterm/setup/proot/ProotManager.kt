@@ -231,6 +231,11 @@ object ProotManager {
     if (NeoPreference.isCameraEnabled()) {
       args.add("NEOTERM_CAMERA_URL=http://127.0.0.1:4715/video.mjpeg")
     }
+    // GPS: NeoTerm's Android-side NMEA bridge (GpsBridge). Point gpsd at it:
+    // `gpsd "$NEOTERM_GPS_NMEA"`. Only exported when GPS is enabled in Settings.
+    if (NeoPreference.isGpsEnabled()) {
+      args.add("NEOTERM_GPS_NMEA=tcp://127.0.0.1:4716")
+    }
     args.add("XDG_RUNTIME_DIR=/tmp")
     // Firefox's content sandbox can't work under proot (ptrace + no user
     // namespaces) and SIGSEGVs its child processes; disable it so the browser

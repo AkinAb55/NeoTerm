@@ -31,6 +31,13 @@
   <uses-feature
     android:name="android.hardware.camera.any"
     android:required="false"/>
+  <!-- Location: lets the GpsBridge feed the device GPS to the distro as an NMEA
+       stream (NEOTERM_GPS_NMEA) for gpsd. -->
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+  <uses-feature
+    android:name="android.hardware.location.gps"
+    android:required="false"/>
   <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
   <application

@@ -76,6 +76,9 @@ class NeoTermService : Service() {
       // Camera: when enabled (+ CAMERA granted), serve the device camera as an
       // MJPEG stream on NEOTERM_CAMERA_URL for distro apps.
       io.neoterm.utils.CameraBridge.start(this)
+      // GPS: when enabled (+ location granted), serve the device GPS as an NMEA
+      // stream on NEOTERM_GPS_NMEA for gpsd.
+      io.neoterm.utils.GpsBridge.start(this)
       // USB host: detect plug-in/out and request permission via a
       // BroadcastReceiver (no manifest device_filter), serving granted devices.
       io.neoterm.utils.UsbBridge.register(this)
@@ -115,6 +118,7 @@ class NeoTermService : Service() {
     stopX11Server()
     io.neoterm.utils.PulseAudioBridge.stop()
     io.neoterm.utils.CameraBridge.stop()
+    io.neoterm.utils.GpsBridge.stop()
     io.neoterm.utils.UsbBridge.unregister(this)
 
     for (i in mTerminalSessions.indices)

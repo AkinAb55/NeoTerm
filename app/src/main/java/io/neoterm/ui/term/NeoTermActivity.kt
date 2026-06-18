@@ -313,6 +313,14 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
     ) {
       needed.add(Manifest.permission.CAMERA)
     }
+    // ACCESS_FINE_LOCATION lets the GpsBridge feed the device GPS to gpsd in the distro. Only
+    // requested when the user enabled GPS in Settings.
+    if (NeoPreference.isGpsEnabled() &&
+      ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+      != PackageManager.PERMISSION_GRANTED
+    ) {
+      needed.add(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
 
     if (needed.isEmpty()) {
       onStartupPermissionsHandled()
@@ -742,6 +750,12 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         if (cameraGranted) {
           io.neoterm.utils.CameraBridge.restart(this)
         }
+        // Likewise start the GPS bridge once location is granted.
+        val gpsGranted = permissions.indexOf(Manifest.permission.ACCESS_FINE_LOCATION)
+          .let { it >= 0 && grantResults.getOrNull(it) == PackageManager.PERMISSION_GRANTED }
+        if (gpsGranted) {
+          io.neoterm.utils.GpsBridge.restart(this)
+        }
         // Storage/notifications are best-effort: the rootfs lives in internal
         // storage, so the app still works if they are declined. Proceed with
         // startup regardless of the result instead of killing the app.
@@ -797,6 +811,22 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
       getString(R.string.key_general_camera_resolution) -> {
         // Re-open the camera at the new resolution (no-op if the camera is off).
         io.neoterm.utils.CameraBridge.restart(this)
+      }
+
+      getString(R.string.key_general_gps) -> {
+        // Toggle GPS: when enabling, ensure location is granted (the grant callback starts the
+        // bridge); otherwise restart now so the bridge starts/stops to match the setting.
+        if (NeoPreference.isGpsEnabled() &&
+          ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+          != PackageManager.PERMISSION_GRANTED
+        ) {
+          ActivityCompat.requestPermissions(
+            this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
+            NeoPermission.REQUEST_APP_PERMISSION
+          )
+        } else {
+          io.neoterm.utils.GpsBridge.restart(this)
+        }
       }
 
       getString(R.string.key_ui_eks_enabled) -> {
