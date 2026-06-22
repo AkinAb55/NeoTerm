@@ -72,6 +72,8 @@ final class TerminalRenderer {
   private final Paint mUnderlinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
   private final android.graphics.Path mUnderlinePath = new android.graphics.Path();
 
+  /** Whether the cursor is drawn as a hollow outline (set per render() call when unfocused). */
+  private boolean mCursorHollow = false;
   /** Whether blinking text is currently in its visible half-cycle (set per render() call). */
   private boolean mTextBlinkVisible = true;
   /** Set during a render pass if any cell carried the BLINK attribute (presence, not phase). */
@@ -108,16 +110,18 @@ final class TerminalRenderer {
    */
   public final void render(TerminalEmulator mEmulator, Canvas canvas, int topRow,
                            int selectionY1, int selectionY2, int selectionX1, int selectionX2,
-                           boolean cursorBlinkOn, boolean textBlinkOn) {
+                           boolean cursorBlinkOn, boolean textBlinkOn, boolean cursorFocused) {
     mTextBlinkVisible = textBlinkOn;
     mHasBlinkingCells = false;
+    mCursorHollow = !cursorFocused;
     final boolean reverseVideo = mEmulator.isReverseVideo();
     final int endRow = topRow + mEmulator.mRows;
     final int columns = mEmulator.mColumns;
     final int cursorCol = mEmulator.getCursorCol();
     final int cursorRow = mEmulator.getCursorRow();
-    // The cursor is shown when the emulator says so AND the view's blink phase is currently "on".
-    final boolean cursorVisible = mEmulator.isShowingCursor() && cursorBlinkOn;
+    // Shown when the emulator says so AND (focused: the blink phase is on; unfocused: always,
+    // as a hollow outline).
+    final boolean cursorVisible = mEmulator.isShowingCursor() && (cursorFocused ? cursorBlinkOn : true);
     final TerminalBuffer screen = mEmulator.getScreen();
     final int[] palette = mEmulator.mColors.mCurrentColors;
     final int cursorShape = mEmulator.getCursorStyle();
@@ -459,7 +463,16 @@ final class TerminalRenderer {
       float cursorHeight = mFontLineSpacingAndAscent - mFontAscent;
       if (cursorStyle == TerminalEmulator.CURSOR_STYLE_UNDERLINE) cursorHeight /= 4.;
       else if (cursorStyle == TerminalEmulator.CURSOR_STYLE_BAR) right -= ((right - left) * 3) / 4.;
-      canvas.drawRect(left, y - cursorHeight, right, y, mTextPaint);
+      if (mCursorHollow) {
+        // Unfocused: draw the cursor as a hollow outline so it's clearly "not active".
+        float w = Math.max(1f, mFontLineSpacing * 0.06f);
+        mTextPaint.setStyle(Paint.Style.STROKE);
+        mTextPaint.setStrokeWidth(w);
+        canvas.drawRect(left + w / 2f, y - cursorHeight + w / 2f, right - w / 2f, y - w / 2f, mTextPaint);
+        mTextPaint.setStyle(Paint.Style.FILL);
+      } else {
+        canvas.drawRect(left, y - cursorHeight, right, y, mTextPaint);
+      }
       savedLastDrawnLineX = left;
       savedLastDrawnLineY = y;
     }
@@ -472,7 +485,9 @@ final class TerminalRenderer {
       // top of it. Draw that glyph in the cell's background colour (reverse video under the
       // cursor) so it stays readable -- otherwise a glyph whose colour happens to match the
       // cursor colour would vanish under the block. Bar/underline cursors don't cover the glyph.
-      final boolean blockCursorOverGlyph = cursor != 0 && cursorStyle == TerminalEmulator.CURSOR_STYLE_BLOCK;
+      // Only a filled block cursor covers the glyph; a hollow outline leaves it normal.
+      final boolean blockCursorOverGlyph =
+        cursor != 0 && cursorStyle == TerminalEmulator.CURSOR_STYLE_BLOCK && !mCursorHollow;
       if (blockCursorOverGlyph) foreColor = backColor;
 
       if (dim && !blockCursorOverGlyph) {

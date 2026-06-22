@@ -1556,7 +1556,7 @@ public final class TerminalView extends View {
         saveCount = canvas.save();
         canvas.translate(0, -mKeyboardPanPx);
       }
-      mRenderer.render(mEmulator, canvas, mTopRow, mSelY1, mSelY2, mSelX1, mSelX2, mCursorBlinkOn, mTextBlinkOn);
+      mRenderer.render(mEmulator, canvas, mTopRow, mSelY1, mSelY2, mSelX1, mSelX2, mCursorBlinkOn, mTextBlinkOn, isFocused());
       // Run the text-blink timer only while blinking content is actually on screen.
       if (mRenderer.hasBlinkingCells()) {
         if (!mTextBlinkScheduled) { mTextBlinkScheduled = true; postDelayed(mTextBlinkRunnable, TEXT_BLINK_MS); }
