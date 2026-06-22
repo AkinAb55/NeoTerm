@@ -813,6 +813,12 @@ class NeoTermActivity : AppCompatActivity(), ServiceConnection, SharedPreference
         io.neoterm.utils.CameraBridge.restart(this)
       }
 
+      getString(R.string.key_general_cursor_style) -> {
+        // Apply the new default cursor shape to every open terminal.
+        val style = NeoPreference.getCursorStyle()
+        forEachTab<TermTab> { it.termData.termView?.setCursorStyle(style) }
+      }
+
       getString(R.string.key_general_gps) -> {
         // Toggle GPS: when enabling, ensure location is granted (the grant callback starts the
         // bridge); otherwise restart now so the bridge starts/stops to match the setting.

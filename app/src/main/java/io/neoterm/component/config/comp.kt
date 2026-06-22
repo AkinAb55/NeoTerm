@@ -333,6 +333,16 @@ object NeoPreference {
     )
   }
 
+  /** The user's default cursor shape: 0 = block, 1 = underline, 2 = bar (TerminalEmulator
+   *  CURSOR_STYLE_*). Apps can still override it at runtime via DECSCUSR. */
+  fun getCursorStyle(): Int {
+    return when (loadString(R.string.key_general_cursor_style, DefaultValues.cursorStyle)) {
+      "underline" -> 1
+      "bar" -> 2
+      else -> 0
+    }
+  }
+
   fun isOscNotificationEnabled(): Boolean {
     return loadBoolean(
       R.string.key_general_osc_notification,

@@ -492,6 +492,13 @@ public final class TerminalEmulator {
     return mCursorStyle;
   }
 
+  /** Set the cursor shape (the user's default; apps can still override it via DECSCUSR). */
+  public void setCursorStyle(int style) {
+    if (style == CURSOR_STYLE_BLOCK || style == CURSOR_STYLE_UNDERLINE || style == CURSOR_STYLE_BAR) {
+      mCursorStyle = style;
+    }
+  }
+
   /** Whether the cursor should blink (DECSCUSR steady/blinking variants). */
   public boolean isCursorBlinkingEnabled() {
     return mCursorBlinkingEnabled;

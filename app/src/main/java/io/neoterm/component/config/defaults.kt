@@ -20,6 +20,7 @@ object DefaultValues {
   const val enableCamera = false
   const val cameraResolution = "1280x720"
   const val enableGps = false
+  const val cursorStyle = "block"
   const val enableWordBasedIme = false
 
   // OSC-escape desktop notifications (OSC 9 / 99 kitty / 777 urxvt). Off by

@@ -511,6 +511,15 @@ public final class TerminalView extends View {
    *
    * @param session The {@link TerminalSession} this view will be displaying.
    */
+  /** The user's default cursor shape (CURSOR_STYLE_*), or -1 to leave the emulator default. */
+  private int mDefaultCursorStyle = -1;
+
+  /** Set the default cursor shape; applied to the emulator now (if attached) and on attach. */
+  public void setCursorStyle(int style) {
+    mDefaultCursorStyle = style;
+    if (mEmulator != null && style >= 0) mEmulator.setCursorStyle(style);
+  }
+
   public boolean attachSession(TerminalSession session) {
     if (session == mTermSession) return false;
     mTopRow = 0;
@@ -520,6 +529,8 @@ public final class TerminalView extends View {
     mCombiningAccent = 0;
 
     updateSize();
+    // Apply the user's default cursor shape to the freshly attached emulator.
+    if (mEmulator != null && mDefaultCursorStyle >= 0) mEmulator.setCursorStyle(mDefaultCursorStyle);
 
     // Wait with enabling the scrollbar until we have a terminal to get scroll position from.
     setVerticalScrollBarEnabled(true);

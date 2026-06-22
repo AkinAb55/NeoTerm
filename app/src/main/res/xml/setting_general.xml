@@ -37,6 +37,14 @@
     android:summary="@string/pref_general_volume_as_control_desc"
     android:title="@string/pref_general_volume_as_control"/>
 
+  <ListPreference
+    android:defaultValue="block"
+    android:entries="@array/pref_general_cursor_style_entries"
+    android:entryValues="@array/pref_general_cursor_style_values"
+    android:key="@string/key_general_cursor_style"
+    android:summary="@string/pref_general_cursor_style_desc"
+    android:title="@string/pref_general_cursor_style"/>
+
   <CheckBoxPreference
     android:defaultValue="false"
     android:key="@string/key_general_microphone"

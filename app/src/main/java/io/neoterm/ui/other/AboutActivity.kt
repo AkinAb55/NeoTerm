@@ -183,6 +183,10 @@ class AboutActivity : AppCompatActivity() {
       openUrl("https://github.com/9hm2/NeoTerm-pr")
     }
 
+    findViewById<View>(R.id.about_recommended_keyboard_view).setOnClickListener {
+      openUrl("https://github.com/9hm2/pcKeyboard")
+    }
+
     findViewById<View>(R.id.about_keyboard_shortcuts_view).setOnClickListener {
       AlertDialog.Builder(this)
         .setTitle(R.string.keyboard_shortcuts_title)
