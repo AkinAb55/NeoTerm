@@ -245,6 +245,13 @@ public final class TerminalEmulator {
   private final int[] mArgs = new int[MAX_ESCAPE_PARAMETERS];
 
   /**
+   * Whether {@link #mArgs}[i] was separated from the previous argument by a colon (ISO 8613-6
+   * sub-parameter) rather than a semicolon. Lets SGR tell {@code 4:3} (curly underline) apart from
+   * {@code 4;3} (underline then italic), and parse the colon colour forms ({@code 38:2:…}).
+   */
+  private final boolean[] mArgsColon = new boolean[MAX_ESCAPE_PARAMETERS];
+
+  /**
    * Holds OSC and device control arguments, which can be strings.
    */
   private final StringBuilder mOSCOrDeviceControlArgs = new StringBuilder();
@@ -319,6 +326,9 @@ public final class TerminalEmulator {
    * Current {@link TextStyle} effect.
    */
   private int mEffect;
+
+  /** Extended underline style (SGR 4:x): one of TextStyle.UNDERLINE_*; 0 = plain single. */
+  private int mUnderlineStyle;
 
   /** The currently-open OSC 8 hyperlink target (applied to written cells), or null. */
   private String mCurrentHyperlink;
@@ -1446,6 +1456,7 @@ public final class TerminalEmulator {
     mEscapeState = ESC;
     mArgIndex = 0;
     Arrays.fill(mArgs, -1);
+    Arrays.fill(mArgsColon, false);
   }
 
   private void doLinefeed() {
@@ -1943,6 +1954,7 @@ public final class TerminalEmulator {
         mForeColor = TextStyle.COLOR_INDEX_FOREGROUND;
         mBackColor = TextStyle.COLOR_INDEX_BACKGROUND;
         mEffect = 0;
+        mUnderlineStyle = 0;
       } else if (code == 1) {
         mEffect |= TextStyle.CHARACTER_ATTRIBUTE_BOLD;
       } else if (code == 2) {
@@ -1950,7 +1962,16 @@ public final class TerminalEmulator {
       } else if (code == 3) {
         mEffect |= TextStyle.CHARACTER_ATTRIBUTE_ITALIC;
       } else if (code == 4) {
-        mEffect |= TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE;
+        // SGR 4, optionally with an ISO 8613-6 colon sub-parameter selecting the underline style:
+        // 4:0 none, 4:1 single, 4:2 double, 4:3 curly, 4:4 dotted, 4:5 dashed. Plain "4" = single.
+        int sub = (i + 1 <= mArgIndex && mArgsColon[i + 1]) ? Math.max(0, mArgs[++i]) : 1;
+        if (sub == 0) {
+          mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE;
+          mUnderlineStyle = 0;
+        } else {
+          mEffect |= TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE;
+          mUnderlineStyle = (sub >= 1 && sub <= 5) ? sub : TextStyle.UNDERLINE_SINGLE;
+        }
       } else if (code == 5) {
         mEffect |= TextStyle.CHARACTER_ATTRIBUTE_BLINK;
       } else if (code == 7) {
@@ -1969,6 +1990,7 @@ public final class TerminalEmulator {
         mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_ITALIC;
       } else if (code == 24) { // underline: none
         mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE;
+        mUnderlineStyle = 0;
       } else if (code == 25) { // blink: none
         mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_BLINK;
       } else if (code == 27) { // image: positive
@@ -1979,45 +2001,41 @@ public final class TerminalEmulator {
         mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_STRIKETHROUGH;
       } else if (code >= 30 && code <= 37) {
         mForeColor = code - 30;
-      } else if (code == 38 || code == 48) {
-        // Extended set foregroundColor(38)/backgroundColor (48) color.
-        // This is followed by either "2;$R;$G;$B" to set a 24-bit color or
-        // "5;$INDEX" to set an indexed color.
-        if (i + 2 > mArgIndex) continue;
-        int firstArg = mArgs[i + 1];
+      } else if (code == 38 || code == 48 || code == 58) {
+        // Extended colour: 38=foreground, 48=background, 58=underline. Followed by the legacy
+        // semicolon form "2;r;g;b" / "5;index", or the ISO 8613-6 colon form "2:cs:r:g:b" /
+        // "2:r:g:b" / "5:index" (an extra colour-space field may precede r/g/b). 58's colour is
+        // parsed and consumed but not stored per-cell yet, so it doesn't change drawing.
+        if (i + 1 > mArgIndex) continue;
+        final boolean colon = mArgsColon[i + 1];
+        final int firstArg = mArgs[i + 1];
+        int groupEnd = i + 1;
+        if (colon) while (groupEnd + 1 <= mArgIndex && mArgsColon[groupEnd + 1]) groupEnd++;
         if (firstArg == 2) {
-          if (i + 4 > mArgIndex) {
-            Log.w(EmulatorDebug.LOG_TAG, "Too few CSI" + code + ";2 RGB arguments");
-          } else {
-            int red = mArgs[i + 2], green = mArgs[i + 3], blue = mArgs[i + 4];
-            if (red < 0 || green < 0 || blue < 0 || red > 255 || green > 255 || blue > 255) {
-              finishSequenceAndLogError("Invalid RGB: " + red + "," + green + "," + blue);
-            } else {
+          // Colon form with a 5-element group ("2:cs:r:g:b") carries a colour-space id before rgb.
+          int rIdx = colon ? ((groupEnd - i >= 5) ? i + 3 : i + 2) : i + 2;
+          int last = colon ? groupEnd : i + 4;
+          if (rIdx + 2 <= mArgIndex) {
+            int red = mArgs[rIdx], green = mArgs[rIdx + 1], blue = mArgs[rIdx + 2];
+            if (red >= 0 && green >= 0 && blue >= 0 && red <= 255 && green <= 255 && blue <= 255) {
               int argbColor = 0xff000000 | (red << 16) | (green << 8) | blue;
-              if (code == 38) {
-                mForeColor = argbColor;
-              } else {
-                mBackColor = argbColor;
-              }
+              if (code == 38) mForeColor = argbColor;
+              else if (code == 48) mBackColor = argbColor;
+              // code == 58: underline colour, not stored.
             }
-            i += 4; // "2;P_r;P_g;P_r"
           }
+          i = Math.min(mArgIndex, last);
         } else if (firstArg == 5) {
-          int color = mArgs[i + 2];
-          i += 2; // "5;P_s"
-          if (color >= 0 && color < TextStyle.NUM_INDEXED_COLORS) {
-            if (code == 38) {
-              mForeColor = color;
-            } else {
-              mBackColor = color;
-            }
-          } else {
-            if (LOG_ESCAPE_SEQUENCES)
-              Log.w(EmulatorDebug.LOG_TAG, "Invalid color index: " + color);
+          int color = (i + 2 <= mArgIndex) ? mArgs[i + 2] : -1;
+          if (code != 58 && color >= 0 && color < TextStyle.NUM_INDEXED_COLORS) {
+            if (code == 38) mForeColor = color;
+            else mBackColor = color;
           }
+          i = Math.min(mArgIndex, colon ? groupEnd : i + 2);
         } else {
-          finishSequenceAndLogError("Invalid ISO-8613-3 SGR first argument: " + firstArg);
+          i = Math.min(mArgIndex, groupEnd);
         }
+      } else if (code == 59) { // Default underline colour - not stored, no-op.
       } else if (code == 39) { // Set default foregroundColor color.
         mForeColor = TextStyle.COLOR_INDEX_FOREGROUND;
       } else if (code >= 40 && code <= 47) { // Set backgroundColor color.
@@ -2235,7 +2253,7 @@ public final class TerminalEmulator {
   }
 
   private long getStyle() {
-    return TextStyle.encode(mForeColor, mBackColor, mEffect);
+    return TextStyle.encode(mForeColor, mBackColor, mEffect) | TextStyle.encodeUnderlineStyle(mUnderlineStyle);
   }
 
   /**
@@ -2305,9 +2323,10 @@ public final class TerminalEmulator {
         mArgs[mArgIndex] = value;
       }
       continueSequence(mEscapeState);
-    } else if (b == ';') {
+    } else if (b == ';' || b == ':') {
       if (mArgIndex < mArgs.length) {
         mArgIndex++;
+        if (mArgIndex < mArgsColon.length) mArgsColon[mArgIndex] = (b == ':');
       }
       continueSequence(mEscapeState);
     } else {

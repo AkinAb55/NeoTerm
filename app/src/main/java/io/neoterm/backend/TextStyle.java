@@ -50,6 +50,26 @@ public final class TextStyle {
    */
   public final static long CHARACTER_ATTRIBUTE_IMAGE = 1L << 11;
 
+  /**
+   * Extended underline style (SGR 4:x), stored in bits 12-14 (the free bits between the image bit
+   * and the background colour). Only meaningful when {@link #CHARACTER_ATTRIBUTE_UNDERLINE} is set;
+   * 0 (or SINGLE) is a plain line.
+   */
+  public final static int UNDERLINE_SINGLE = 1;
+  public final static int UNDERLINE_DOUBLE = 2;
+  public final static int UNDERLINE_CURLY = 3;
+  public final static int UNDERLINE_DOTTED = 4;
+  public final static int UNDERLINE_DASHED = 5;
+  private final static int UNDERLINE_STYLE_SHIFT = 12;
+
+  public static long encodeUnderlineStyle(int underlineStyle) {
+    return ((long) (underlineStyle & 0b111)) << UNDERLINE_STYLE_SHIFT;
+  }
+
+  public static int decodeUnderlineStyle(long style) {
+    return (int) ((style >>> UNDERLINE_STYLE_SHIFT) & 0b111);
+  }
+
   public final static int COLOR_INDEX_FOREGROUND = 256;
   public final static int COLOR_INDEX_BACKGROUND = 257;
   public final static int COLOR_INDEX_CURSOR = 258;

@@ -68,6 +68,10 @@ final class TerminalRenderer {
   private final RectF mImageDst = new RectF();
   private final Paint mImagePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
+  // Reusable objects for drawing extended underline styles (double/curly/dotted/dashed).
+  private final Paint mUnderlinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+  private final android.graphics.Path mUnderlinePath = new android.graphics.Path();
+
   public TerminalRenderer(int textSize, Typeface typeface) {
     mTextSize = textSize;
     mTypeface = typeface;
@@ -465,8 +469,13 @@ final class TerminalRenderer {
         foreColor = 0xFF000000 + (red << 16) + (green << 8) + blue;
       }
 
+      // Plain single underline is drawn by Paint; double/curly/dotted/dashed are drawn manually
+      // below (forceUnderline, e.g. for URLs, has no style and stays a single line).
+      final int underlineStyle = underline ? TextStyle.decodeUnderlineStyle(textStyle) : 0;
+      final boolean customUnderline = underlineStyle >= TextStyle.UNDERLINE_DOUBLE;
+
       mTextPaint.setFakeBoldText(bold);
-      mTextPaint.setUnderlineText(underline);
+      mTextPaint.setUnderlineText(underline && !customUnderline);
       mTextPaint.setTextSkewX(italic ? -0.35f : 0.f);
       mTextPaint.setStrikeThruText(strikeThrough);
       mTextPaint.setColor(foreColor);
@@ -475,10 +484,61 @@ final class TerminalRenderer {
       // typeface was switched (and the run measured) above; it is restored below so
       // it is reset even for invisible runs.
       canvas.drawText(text, startCharIndex, runWidthChars, left, y - mFontLineSpacingAndAscent, mTextPaint);
+
+      if (customUnderline) drawExtendedUnderline(canvas, left, right, y, foreColor, underlineStyle);
     }
 
     if (fallbackFont) mTextPaint.setTypeface(mTypeface);
     if (savedMatrix) canvas.restore();
+  }
+
+  /** Draw a double/curly/dotted/dashed underline across [left,right] near the cell bottom. */
+  private void drawExtendedUnderline(Canvas canvas, float left, float right, float y, int color, int style) {
+    final float thickness = Math.max(1f, mFontLineSpacing * 0.06f);
+    final float baseline = y - mFontLineSpacingAndAscent;
+    float lineY = baseline + mFontLineSpacing * 0.12f;
+    if (lineY > y - thickness) lineY = y - thickness;
+
+    mUnderlinePaint.setColor(color);
+    mUnderlinePaint.setStyle(Paint.Style.STROKE);
+    mUnderlinePaint.setStrokeWidth(thickness);
+    mUnderlinePaint.setPathEffect(null);
+
+    switch (style) {
+      case TextStyle.UNDERLINE_DOUBLE: {
+        float gap = thickness + 1.5f;
+        canvas.drawLine(left, lineY, right, lineY, mUnderlinePaint);
+        canvas.drawLine(left, lineY - gap, right, lineY - gap, mUnderlinePaint);
+        break;
+      }
+      case TextStyle.UNDERLINE_CURLY: {
+        float amp = Math.max(1f, mFontLineSpacing * 0.06f);
+        float period = Math.max(4f, mFontWidth * 0.5f);
+        float midY = lineY - amp;
+        mUnderlinePath.rewind();
+        mUnderlinePath.moveTo(left, midY);
+        boolean up = true;
+        for (float x = left; x < right; x += period) {
+          float nx = Math.min(x + period, right);
+          mUnderlinePath.quadTo((x + nx) / 2f, midY + (up ? -amp : amp), nx, midY);
+          up = !up;
+        }
+        canvas.drawPath(mUnderlinePath, mUnderlinePaint);
+        break;
+      }
+      case TextStyle.UNDERLINE_DOTTED:
+        mUnderlinePaint.setPathEffect(new android.graphics.DashPathEffect(new float[]{thickness, thickness * 2f}, 0f));
+        canvas.drawLine(left, lineY, right, lineY, mUnderlinePaint);
+        mUnderlinePaint.setPathEffect(null);
+        break;
+      case TextStyle.UNDERLINE_DASHED:
+        mUnderlinePaint.setPathEffect(new android.graphics.DashPathEffect(new float[]{mFontWidth * 0.5f, mFontWidth * 0.3f}, 0f));
+        canvas.drawLine(left, lineY, right, lineY, mUnderlinePaint);
+        mUnderlinePaint.setPathEffect(null);
+        break;
+      default:
+        canvas.drawLine(left, lineY, right, lineY, mUnderlinePaint);
+    }
   }
 
   float getCursorX() {
