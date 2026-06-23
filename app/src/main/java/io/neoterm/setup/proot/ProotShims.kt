@@ -54,18 +54,14 @@ esac
 """
 
   private const val DMESG = """#!/bin/sh
-# Minimal dmesg proot-hoz: Android tiltja a kernel ring buffert, ezért egy
-# rövid, valószerű boot-logot adunk a NeoTerm/proot userlandről. NeoTerm.
+# Minimal dmesg proot-hoz: Android tiltja a kernel ring buffert, ezért egy rövid
+# boot-logot adunk. Robusztus (nem függ awk-tól / /proc/mounts-tól), és a
+# kernel-sor a VALÓDI kernel (uname), hogy egyezzen az `uname -a`-val. NeoTerm.
 emit() { printf '[%11.6f] %s\n' "${'$'}2" "${'$'}1"; }
-ver=${'$'}(cat /proc/version 2>/dev/null || echo "Linux")
 up=${'$'}(cut -d' ' -f1 /proc/uptime 2>/dev/null || echo 0)
-emit "${'$'}ver" 0.000000
-emit "NeoTerm proot userland: fake root (-0), USERLAND xattr ownership" 0.000100
-emit "Command line: BOOT_IMAGE=proot quiet" 0.000200
-# A guest-releváns mountokat mutatjuk (a host /proc/mounts több száz Android
-# apex/vendor mountot tartalmazna — zaj).
-mnt=${'$'}(awk '${'$'}2=="/" || ${'$'}2 ~ /^\/(proc|sys|dev|tmp|root|etc|usr|var|home|run)(\/|${'$'})/ {print ${'$'}2}' /proc/mounts 2>/dev/null | tr '\n' ' ')
-[ -n "${'$'}mnt" ] && emit "Mounts: ${'$'}mnt" 0.000300
+emit "Linux ${'$'}(uname -r 2>/dev/null || echo unknown) - NeoTerm proot userland (fake root -0, xattr ownership)" 0.000000
+emit "Command line: BOOT_IMAGE=proot quiet" 0.000100
+emit "Mounts: / /proc /sys /dev /dev/pts /dev/shm /tmp" 0.000200
 emit "NeoTerm runtime (uptime): ${'$'}{up}s" "${'$'}up"
 """
 
