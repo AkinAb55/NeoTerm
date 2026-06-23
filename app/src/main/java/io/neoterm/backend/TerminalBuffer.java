@@ -166,8 +166,15 @@ public final class TerminalBuffer {
           }
         }
       } else if (shiftDownOfTopRow < 0) {
-        // Negative shift down = expanding. Only move screen up if there is transcript to show:
-        int actualShift = Math.max(shiftDownOfTopRow, -mActiveTranscriptRows);
+        // Expanding. Pull history back from the transcript only when there's content anchored at
+        // the bottom (so a bottom UI like a status box stays put across a resize). If the bottom
+        // is blank -- e.g. just after a screen clear, with the prompt near the top -- adding
+        // transcript rows would push that content DOWN; a transient resize on every keyboard/
+        // recents round-trip then drifts it down a row at a time. So add blank rows at the bottom
+        // instead, keeping the content where it is.
+        int rb = externalToInternalRow(mScreenRows - 1);
+        boolean bottomBlank = (mLines[rb] == null || mLines[rb].isBlank());
+        int actualShift = bottomBlank ? 0 : Math.max(shiftDownOfTopRow, -mActiveTranscriptRows);
         if (shiftDownOfTopRow != actualShift) {
           // The new lines revealed by the resizing are not all from the transcript. Blank the below ones.
           for (int i = 0; i < actualShift - shiftDownOfTopRow; i++)
