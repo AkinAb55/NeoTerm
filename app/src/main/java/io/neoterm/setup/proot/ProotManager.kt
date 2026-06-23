@@ -208,12 +208,11 @@ object ProotManager {
     }
     bind(args, kmsgBuf.absolutePath, "/dev/kmsg")
 
-    // USB-serial bridge: bind each active adapter's PTY slave onto /dev/ttyUSB*
-    // (the chip is driven app-side by usb-serial-for-android). Bound per launch;
-    // plug the adapter before opening the session (or open a new tab) to see it.
-    io.neoterm.setup.usbserial.UsbSerialBridge.bindings().forEach { (slave, tty) ->
-      if (File(slave).exists()) bind(args, slave, tty)
-    }
+    // USB-serial: /dev/ttyUSB* are VIRTUAL hotplug ports, not static binds — the
+    // proot open-redirect (enter.c) maps them to the live PTY at open time. Just
+    // make sure the app-side control/redirect server is up before the guest opens
+    // them. A device can be (un)plugged any time during the session.
+    io.neoterm.setup.usbserial.UsbSerialBridge.ensureReady()
 
     // Fake /proc fájlok (proot-distro sysdata mintájára): az Android korlátozott
     // /proc-ja miatt a ps/top/uptime/free hibára futna ("Unable to get system

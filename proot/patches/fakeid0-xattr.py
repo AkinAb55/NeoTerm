@@ -304,21 +304,20 @@ s2 = re.sub(r'int fake_id0_handle_statx_syscall\(.*?\n\}\n', lambda _m: statx_ne
 must(s2!=s, "replace statx handler"); s=s2
 wr(sp, s)
 
-# ---- syscall/enter.c: proxy the PTY modem-control / break ioctls
-#      (TIOCMGET/TIOCMSET/TIOCMBIS/TIOCMBIC, TCSBRK, TIOCSBRK/TIOCCBRK) on a bound
-#      /dev/ttyUSB* (a PTY slave) to the app-side usb-serial bridge over the
-#      io.neoterm.ttyusb abstract socket, so DTR/RTS/CTS/DSR/DCD/RI and BREAK
-#      reach the real chip. The data path stays native; this mirrors the existing
-#      in-tracer SIOCGIFINDEX fake. Non-serial PTYs (the shell) get a NAK and the
-#      real ioctl runs. ----
+# ---- syscall/enter.c: (a) redirect open/stat of the virtual hotplug port
+#      /dev/ttyUSB<n> to its current live PTY slave (queried from the app), and
+#      (b) proxy the PTY modem-control / break ioctls (TIOCMGET/SET/BIS/BIC,
+#      TCSBRK, TIOCSBRK/CBRK) to the app over the io.neoterm.ttyusb abstract
+#      socket, so DTR/RTS/CTS/DSR/DCD/RI/BREAK reach the real chip. The string
+#      guard means non-ttyUSB / non-serial paths are completely unaffected. ----
 EN = ROOT + "/syscall/enter.c"; s = rd(EN)
 if 'uknl_modem_call' not in s:
     must('#include <sys/ioctl.h>' in s, "enter.c sys/ioctl include")
     s = s.replace('#include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */',
                   '#include <sys/ioctl.h>   /* ioctl(2): SIOCGIFMTU / SIOCGIFHWADDR */\n'
-                  '#include <stdlib.h>      /* atoi(3) — NeoTerm usb-serial modem proxy */', 1)
+                  '#include <stdlib.h>      /* atoi(3) — NeoTerm usb-serial proxy */', 1)
     func = (
-        '/* NeoTerm: one request/reply to the app-side usb-serial modem server. */\n'
+        '/* NeoTerm: one request/reply to the app-side usb-serial server. */\n'
         'static bool uknl_modem_call(const char *req, char *resp, size_t resp_sz)\n'
         '{\n'
         '\tint s = socket(AF_UNIX, SOCK_STREAM, 0);\n'
@@ -345,7 +344,22 @@ if 'uknl_modem_call' not in s:
         '\tif (n <= 0)\n'
         '\t\treturn false;\n'
         '\tresp[n] = \'\\0\';\n'
+        '\twhile (n > 0 && (resp[n - 1] == \'\\n\' || resp[n - 1] == \'\\r\'))\n'
+        '\t\tresp[--n] = \'\\0\';\n'
         '\treturn true;\n'
+        '}\n'
+        '\n'
+        '/* NeoTerm: rewrite /dev/ttyUSB<n> to its current live PTY slave. Leaves the\n'
+        ' * path unchanged when there is no live port (-> normal ENOENT). */\n'
+        'static void uknl_ttyusb_redirect(char path[PATH_MAX])\n'
+        '{\n'
+        '\tconst char *base = strrchr(path, \'/\');\n'
+        '\tif (base == NULL)\n'
+        '\t\treturn;\n'
+        '\tchar req[64], resp[PATH_MAX];\n'
+        '\tsnprintf(req, sizeof(req), "PATH %s\\n", base + 1);\n'
+        '\tif (uknl_modem_call(req, resp, sizeof(resp)) && strncmp(resp, "/dev/pts/", 9) == 0)\n'
+        '\t\tstrncpy(path, resp, PATH_MAX - 1);\n'
         '}\n'
         '\n'
         '/* NeoTerm: forward a PTY modem-control/break ioctl to the usb-serial bridge.\n'
@@ -390,9 +404,19 @@ if 'uknl_modem_call' not in s:
         '\t\treturn false;\n'
         '\t}\n'
         '}\n\n')
-    anchor_fn = 'static bool maybe_fake_siocgifindex(Tracee *tracee, word_t cmd, word_t arg)\n{'
-    must(anchor_fn in s, "enter.c siocgifindex fn anchor")
+    anchor_fn = 'static int translate_path2(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg reg, Type type)\n{'
+    must(anchor_fn in s, "enter.c translate_path2 fn anchor")
     s = s.replace(anchor_fn, func + anchor_fn, 1)
+    # (a) open/stat redirect inside translate_path2, right after the NULL check
+    anchor_null = ('\t/* Special case where the argument was NULL. */\n'
+                   '\tif (path[0] == \'\\0\')\n'
+                   '\t\treturn 0;')
+    must(anchor_null in s, "enter.c translate_path2 NULL check anchor")
+    s = s.replace(anchor_null, anchor_null +
+                  ('\n\n\t/* NeoTerm: /dev/ttyUSB<n> -> its current live PTY (virtual hotplug port). */\n'
+                   '\tif (strncmp(path, "/dev/ttyUSB", 11) == 0)\n'
+                   '\t\tuknl_ttyusb_redirect(path);'), 1)
+    # (b) modem-control ioctl proxy, after the SIOCGIFINDEX fake
     anchor_case = ('\t\tif (cmd == SIOCGIFINDEX && maybe_fake_siocgifindex(tracee, cmd, arg)) {\n'
                    '\t\t\tpoke_reg(tracee, SYSARG_RESULT, 0);\n'
                    '\t\t\tset_sysnum(tracee, PR_void);\n'

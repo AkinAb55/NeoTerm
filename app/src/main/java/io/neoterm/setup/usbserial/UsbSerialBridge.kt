@@ -23,59 +23,56 @@ import io.neoterm.setup.proot.Kmsg
 import io.neoterm.utils.NLog
 
 /**
- * USB-serial bridge with hotplug: a fixed pool of PTYs is created once and bound
- * by proot onto /dev/ttyUSB0..N at launch, so the ports always exist. When an
- * adapter is attached it is assigned to a free pool slot and its chip (driven by
- * usb-serial-for-android) is pumped to that slot's PTY; on detach the slot is
- * freed but the PTY stays bound, so a later plug reuses it live — no new tab.
+ * USB-serial bridge with proper hotplug. /dev/ttyUSB<n> is a VIRTUAL port: the
+ * proot open-redirect (syscall/enter.c) asks this server "PATH ttyUSBn" and
+ * rewrites the open to the current live PTY slave. So a port exists only while a
+ * device is attached, disconnects cleanly on unplug (the PTY master is closed →
+ * the guest's read returns EOF), and the SAME ttyUSB number is reused on replug.
  *
- * Everything notable is logged to the kmsg/dmesg buffer ([Kmsg]) for debugging.
- * Data + termios (baud/data/stop/parity/flow) flow via the PTY; modem lines
- * (DTR/RTS/CTS/DSR/DCD/RI) + BREAK are handled by the proot ioctl proxy (later).
+ * The chip is driven app-side by usb-serial-for-android; data flows PTY-native;
+ * the guest's termios (baud/data/stop/parity) is read off the PTY master and
+ * programmed onto the chip; modem lines (DTR/RTS/CTS/DSR/DCD/RI) + BREAK come
+ * through the proot ioctl proxy to this same server. Gated by
+ * [NeoPreference.isUsbSerialEnabled]; the device table is kernel-derived
+ * ([UsbSerialIds]); everything notable is logged to dmesg ([Kmsg]).
  */
 object UsbSerialBridge {
 
   private const val POOL = 4
   private const val TAG = "UsbSerial"
 
-  private class Slot(
-    var pfd: ParcelFileDescriptor,   // owns the PTY master fd (recreated per launch)
-    var slavePath: String,
-    val ttyName: String,
-  ) {
+  private class Slot(val ttyName: String) {
     @Volatile var running = false
-    @Volatile var alive = true       // false once the master was closed on detach
     var deviceName: String? = null
     var port: UsbSerialPort? = null
     var conn: UsbDeviceConnection? = null
+    var pfd: ParcelFileDescriptor? = null   // PTY master, created on attach
+    var slavePath: String? = null           // /dev/pts/N the redirect points to
     val threads = ArrayList<Thread>()
     var lastParams: IntArray? = null
-    var dtr = false       // cached modem-control outputs (PTY can't carry them)
+    var dtr = false
     var rts = false
     var lastModemLogMs = 0L
-    val masterJfd get() = pfd.fileDescriptor
-    val masterFd: Int get() = pfd.fd
   }
 
-  private var pool: Array<Slot>? = null
+  private val slots = Array(POOL) { Slot("ttyUSB$it") }
   private var controlServer: LocalServerSocket? = null
+  @Volatile private var started = false
 
-  // ── modem-line control server (io.neoterm.ttyusb) ───────────────────────
-  // The proot ioctl proxy forwards the guest's TIOCMGET/TIOCMSET/TIOCMBIS/
-  // TIOCMBIC/TCSBRK on a /dev/ttyUSB* fd here (resolved to its PTY slave path),
-  // so DTR/RTS/CTS/DSR/DCD/RI/BREAK reach the real chip. Line protocol:
-  //   GET <pts>            -> "<modembits>" | "NAK"
-  //   SET|BIS|BIC <pts> <bits> -> "OK" | "NAK"
-  //   BRK <pts> <0|1|p>    -> "OK" | "NAK"
-  // modem bits = Linux TIOCM_*: DTR 0x002 RTS 0x004 CTS 0x020 CAR 0x040 RNG 0x080 DSR 0x100
-  private fun startControlServer() {
-    if (controlServer != null) return
+  // ── server lifecycle ────────────────────────────────────────────────────
+  /** Start the app-side control server (open-redirect + LIST + modem). Called at
+   *  proot launch and on attach; idempotent and gated by the toggle. */
+  @Synchronized
+  fun ensureReady() {
+    if (started) return
+    if (!NeoPreference.isUsbSerialEnabled()) return
     val srv = try { LocalServerSocket("io.neoterm.ttyusb") } catch (e: Exception) {
-      Kmsg.log("usb-serial: modem control bind failed: ${e.message}"); return
+      Kmsg.log("usb-serial: control socket bind failed: ${e.message}"); return
     }
     controlServer = srv
+    started = true
     Thread({
-      Kmsg.log("usb-serial: modem control server ready (io.neoterm.ttyusb)")
+      Kmsg.log("usb-serial: ready — virtual hotplug ports /dev/ttyUSB0..${POOL - 1}")
       while (true) {
         val c = try { srv.accept() } catch (e: Exception) { break }
         runCatching { handleControl(c) }
@@ -84,19 +81,141 @@ object UsbSerialBridge {
     }, "ttyusb-control").apply { isDaemon = true; start() }
   }
 
+  // ── device recognition ──────────────────────────────────────────────────
+  fun isSerial(device: UsbDevice): Boolean = driverTag(device) != null
+
+  private fun driverTag(device: UsbDevice): String? {
+    UsbSerialIds.driverFor(device.vendorId, device.productId)?.let { return it }
+    for (i in 0 until device.interfaceCount) {
+      val c = device.getInterface(i).interfaceClass
+      if (c == UsbConstants.USB_CLASS_COMM || c == UsbConstants.USB_CLASS_CDC_DATA) return "CdcAcmSerialDriver"
+    }
+    return null
+  }
+
+  private fun driverFor(device: UsbDevice): UsbSerialDriver? = when (driverTag(device)) {
+    "FtdiSerialDriver" -> FtdiSerialDriver(device)
+    "Cp21xxSerialDriver" -> Cp21xxSerialDriver(device)
+    "Ch34xSerialDriver" -> Ch34xSerialDriver(device)
+    "ProlificSerialDriver" -> ProlificSerialDriver(device)
+    "CdcAcmSerialDriver" -> CdcAcmSerialDriver(device)
+    else -> null
+  }
+
+  // ── attach / detach ─────────────────────────────────────────────────────
+  @Synchronized
+  fun attach(usb: UsbManager, device: UsbDevice) {
+    ensureReady()
+    if (!NeoPreference.isUsbSerialEnabled()) return
+    val id = "%04x:%04x".format(device.vendorId, device.productId)
+    if (slots.any { it.deviceName == device.deviceName }) return  // already bridged
+    val driver = driverFor(device) ?: return
+    if (!usb.hasPermission(device)) {
+      Kmsg.log("usb-serial: $id detected (${driver.javaClass.simpleName}) — waiting for USB permission")
+      return
+    }
+    val slot = slots.firstOrNull { it.deviceName == null }
+    if (slot == null) { Kmsg.log("usb-serial: $id detected but all $POOL ports busy"); return }
+    val conn = runCatching { usb.openDevice(device) }.getOrNull()
+    if (conn == null) { Kmsg.log("usb-serial: $id openDevice() failed"); return }
+    val port = driver.ports.firstOrNull()
+    if (port == null) { runCatching { conn.close() }; Kmsg.log("usb-serial: $id has no serial ports"); return }
+    try {
+      port.open(conn)
+      port.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+    } catch (e: Exception) {
+      Kmsg.log("usb-serial: $id open failed: ${e.message}")
+      runCatching { port.close() }; runCatching { conn.close() }; return
+    }
+    val out = IntArray(1)
+    val slave = Pty.open(out)
+    if (slave == null) {
+      Kmsg.log("usb-serial: $id openPty failed")
+      runCatching { port.close() }; runCatching { conn.close() }; return
+    }
+    slot.pfd = ParcelFileDescriptor.adoptFd(out[0])
+    slot.slavePath = slave
+    slot.deviceName = device.deviceName
+    slot.port = port
+    slot.conn = conn
+    slot.dtr = false; slot.rts = false; slot.lastParams = null; slot.running = true
+    startPump(slot, slot.pfd!!)
+    val product = runCatching { device.productName }.getOrNull()?.takeIf { it.isNotBlank() } ?: ""
+    Kmsg.log("usb-serial: ${slot.ttyName} <- $id ${product.ifEmpty { driver.javaClass.simpleName }} (${driver.javaClass.simpleName}) @9600 8N1")
+    NLog.e(TAG, "attached ${slot.ttyName} ($id)")
+  }
+
+  @Synchronized
+  fun onDetached(device: UsbDevice?) {
+    val name = device?.deviceName ?: return
+    val slot = slots.firstOrNull { it.deviceName == name } ?: return
+    teardown(slot, "${slot.ttyName}: adapter disconnected")
+  }
+
+  @Synchronized
+  fun stopAll() {
+    slots.forEach { if (it.deviceName != null) teardown(it, "${it.ttyName}: released (service stop)") }
+    runCatching { controlServer?.close() }
+    controlServer = null
+    started = false
+  }
+
+  /** Close the chip and the PTY master so a program holding /dev/ttyUSB* gets EOF
+   *  and exits cleanly (clean unplug). The port number is freed for reuse. */
+  private fun teardown(slot: Slot, msg: String) {
+    slot.running = false
+    slot.threads.forEach { it.interrupt() }
+    slot.threads.clear()
+    runCatching { slot.port?.close() }
+    runCatching { slot.conn?.close() }
+    runCatching { slot.pfd?.close() }   // -> guest read returns EOF
+    slot.port = null
+    slot.conn = null
+    slot.pfd = null
+    slot.slavePath = null
+    slot.deviceName = null
+    slot.lastParams = null
+    slot.dtr = false
+    slot.rts = false
+    Kmsg.log("usb-serial: $msg")
+  }
+
+  // ── control server: open-redirect + enumeration + modem ─────────────────
+  // PATH <ttyUSBn>          -> "<pts path>" | "NAK"   (proot open-redirect)
+  // LIST                    -> "ttyUSB0 ttyUSB2 ..." | "-"
+  // GET <pts>               -> "<modembits>" | "NAK"
+  // SET|BIS|BIC <pts> <bits>-> "OK" | "NAK"
+  // BRK <pts> <0|1|p>       -> "OK" | "NAK"
+  // modem bits = Linux TIOCM_*: DTR 0x002 RTS 0x004 CTS 0x020 CAR 0x040 RNG 0x080 DSR 0x100
   private fun handleControl(c: LocalSocket) {
     val line = c.inputStream.bufferedReader().readLine()?.trim() ?: return
     val out = c.outputStream
     fun reply(s: String) { out.write((s + "\n").toByteArray()); out.flush() }
     val parts = line.split(" ")
-    if (parts.size < 2) { reply("NAK"); return }
-    val op = parts[0]
-    val pts = parts[1]
-    val slot = synchronized(this) { pool?.firstOrNull { it.slavePath == pts && it.port != null } }
+    when (parts.getOrNull(0)) {
+      "PATH" -> {
+        val tty = parts.getOrNull(1)
+        val pts = synchronized(this) {
+          slots.firstOrNull { it.ttyName == tty && it.slavePath != null && it.port != null }?.slavePath
+        }
+        reply(pts ?: "NAK")
+      }
+      "LIST" -> {
+        val active = synchronized(this) { slots.filter { it.slavePath != null }.map { it.ttyName } }
+        reply(if (active.isEmpty()) "-" else active.joinToString(" "))
+      }
+      "GET", "SET", "BIS", "BIC", "BRK" -> handleModem(parts, ::reply)
+      else -> reply("NAK")
+    }
+  }
+
+  private fun handleModem(parts: List<String>, reply: (String) -> Unit) {
+    val pts = parts.getOrNull(1)
+    val slot = synchronized(this) { slots.firstOrNull { it.slavePath == pts && it.port != null } }
     val port = slot?.port
     if (slot == null || port == null) { reply("NAK"); return }
     val bits = parts.getOrNull(2)?.toIntOrNull() ?: 0
-    when (op) {
+    when (parts[0]) {
       "GET" -> {
         var m = 0
         if (slot.dtr) m = m or 0x002
@@ -127,8 +246,7 @@ object UsbSerialBridge {
     val port = slot.port ?: return
     if (dtr != slot.dtr) { runCatching { port.setDTR(dtr) }; slot.dtr = dtr }
     if (rts != slot.rts) { runCatching { port.setRTS(rts) }; slot.rts = rts }
-    // Throttle the log: reset sequences (esptool/avrdude) toggle DTR/RTS dozens of
-    // times in a burst and would otherwise flood the dmesg buffer.
+    // Throttle: reset sequences (esptool/avrdude) toggle DTR/RTS dozens of times.
     val now = System.currentTimeMillis()
     if (now - slot.lastModemLogMs >= 300) {
       slot.lastModemLogMs = now
@@ -136,178 +254,34 @@ object UsbSerialBridge {
     }
   }
 
-  // ── pool lifecycle ──────────────────────────────────────────────────────
-  @Synchronized
-  private fun ensurePool(): Array<Slot>? {
-    pool?.let { return it }
-    if (!NeoPreference.isUsbSerialEnabled()) return null
-    val slots = ArrayList<Slot>(POOL)
-    for (i in 0 until POOL) {
-      val out = IntArray(1)
-      val slave = Pty.open(out) ?: break
-      slots.add(Slot(ParcelFileDescriptor.adoptFd(out[0]), slave, "ttyUSB$i"))
-    }
-    if (slots.isEmpty()) {
-      Kmsg.log("usb-serial: PTY pool creation failed (no /dev/ttyUSB*)")
-      return null
-    }
-    val arr = slots.toTypedArray()
-    pool = arr
-    startControlServer()
-    Kmsg.log("usb-serial: ready — pool of ${arr.size} ports /dev/ttyUSB0..${arr.size - 1} (hotplug)")
-    return arr
-  }
-
-  /** (slavePath -> "/dev/ttyUSBn") pairs for ProotManager to bind at launch.
-   *  Slots whose master was closed on detach are recreated here, so every new
-   *  session gets a fresh, live, bindable PTY per port. */
-  @Synchronized
-  fun bindings(): List<Pair<String, String>> {
-    val p = ensurePool() ?: return emptyList()
-    for (slot in p) {
-      if (!slot.alive) {
-        val out = IntArray(1)
-        val slave = Pty.open(out)
-        if (slave != null) {
-          slot.pfd = ParcelFileDescriptor.adoptFd(out[0])
-          slot.slavePath = slave
-          slot.alive = true
-        }
-      }
-    }
-    return p.filter { it.alive }.map { it.slavePath to "/dev/${it.ttyName}" }
-  }
-
-  // ── device recognition ──────────────────────────────────────────────────
-  /** True if this device is a USB-serial chip we can drive (cheap, no open). */
-  fun isSerial(device: UsbDevice): Boolean = driverTag(device) != null
-
-  private fun driverTag(device: UsbDevice): String? {
-    UsbSerialIds.driverFor(device.vendorId, device.productId)?.let { return it }
-    for (i in 0 until device.interfaceCount) {
-      val c = device.getInterface(i).interfaceClass
-      if (c == UsbConstants.USB_CLASS_COMM || c == UsbConstants.USB_CLASS_CDC_DATA) return "CdcAcmSerialDriver"
-    }
-    return null
-  }
-
-  private fun driverFor(device: UsbDevice): UsbSerialDriver? = when (driverTag(device)) {
-    "FtdiSerialDriver" -> FtdiSerialDriver(device)
-    "Cp21xxSerialDriver" -> Cp21xxSerialDriver(device)
-    "Ch34xSerialDriver" -> Ch34xSerialDriver(device)
-    "ProlificSerialDriver" -> ProlificSerialDriver(device)
-    "CdcAcmSerialDriver" -> CdcAcmSerialDriver(device)
-    else -> null
-  }
-
-  // ── attach / detach ─────────────────────────────────────────────────────
-  @Synchronized
-  fun attach(usb: UsbManager, device: UsbDevice) {
-    if (!NeoPreference.isUsbSerialEnabled()) return
-    val id = "%04x:%04x".format(device.vendorId, device.productId)
-    val p = ensurePool() ?: return
-    if (p.any { it.deviceName == device.deviceName }) return  // already bridged
-    val driver = driverFor(device) ?: return
-    if (!usb.hasPermission(device)) {
-      Kmsg.log("usb-serial: $id detected (${driver.javaClass.simpleName}) — waiting for USB permission")
-      return
-    }
-    // Only slots whose launch-bound PTY is still live can be used this session.
-    val slot = p.firstOrNull { it.deviceName == null && it.alive }
-    if (slot == null) {
-      Kmsg.log("usb-serial: $id detected but no free /dev/ttyUSB* this session (open a new tab)")
-      return
-    }
-    val conn = runCatching { usb.openDevice(device) }.getOrNull()
-    if (conn == null) { Kmsg.log("usb-serial: $id openDevice() failed"); return }
-    val port = driver.ports.firstOrNull()
-    if (port == null) { runCatching { conn.close() }; Kmsg.log("usb-serial: $id has no serial ports"); return }
-    try {
-      port.open(conn)
-      port.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-    } catch (e: Exception) {
-      Kmsg.log("usb-serial: $id open failed: ${e.message}")
-      runCatching { port.close() }; runCatching { conn.close() }; return
-    }
-    slot.deviceName = device.deviceName
-    slot.port = port
-    slot.conn = conn
-    slot.lastParams = null
-    slot.running = true
-    startPump(slot)
-    val product = runCatching { device.productName }.getOrNull()?.takeIf { it.isNotBlank() } ?: ""
-    Kmsg.log("usb-serial: ${slot.ttyName} <- $id ${product.ifEmpty { driver.javaClass.simpleName }} (${driver.javaClass.simpleName}) @9600 8N1")
-    NLog.e(TAG, "attached ${slot.ttyName} for ${device.deviceName} ($id)")
-  }
-
-  @Synchronized
-  fun onDetached(device: UsbDevice?) {
-    val name = device?.deviceName ?: return
-    val slot = pool?.firstOrNull { it.deviceName == name } ?: return
-    releaseSlot(slot, "${slot.ttyName}: adapter disconnected")
-  }
-
-  @Synchronized
-  fun stopAll() {
-    pool?.forEach { slot ->
-      if (slot.deviceName != null) releaseSlot(slot, "${slot.ttyName}: released (service stop)")
-      runCatching { slot.pfd.close() }
-    }
-    pool = null
-    runCatching { controlServer?.close() }
-    controlServer = null
-  }
-
-  /** Stop pumping, close the chip, and CLOSE the PTY master so a program holding
-   *  /dev/ttyUSB* (screen/picocom) gets EOF and exits cleanly — like a real
-   *  unplug. The slot's PTY is recreated at the next launch (see [bindings]). */
-  private fun releaseSlot(slot: Slot, msg: String) {
-    slot.running = false
-    slot.threads.forEach { it.interrupt() }
-    slot.threads.clear()
-    runCatching { slot.port?.close() }
-    runCatching { slot.conn?.close() }
-    runCatching { slot.pfd.close() }   // -> guest read returns EOF (clean disconnect)
-    slot.alive = false
-    slot.port = null
-    slot.conn = null
-    slot.deviceName = null
-    slot.lastParams = null
-    slot.dtr = false
-    slot.rts = false
-    Kmsg.log("usb-serial: $msg")
-  }
-
   // ── pump ────────────────────────────────────────────────────────────────
-  private fun startPump(slot: Slot) {
-    // chip -> pty (port.read has a 200ms timeout, so it exits promptly on stop).
+  private fun startPump(slot: Slot, pfd: ParcelFileDescriptor) {
+    val masterJfd = pfd.fileDescriptor
+    val masterFd = pfd.fd
+    // chip -> pty (port.read has a 200ms timeout; also polls the guest's termios).
     val rx = Thread({
       val buf = ByteArray(4096)
       while (slot.running) {
+        applyParamsIfChanged(slot, masterFd)
         val n = try {
           slot.port?.read(buf, 200) ?: break
         } catch (e: Exception) {
-          if (slot.running) Kmsg.log("usb-serial: ${slot.ttyName} read error: ${e.message}")
-          break
+          if (slot.running) Kmsg.log("usb-serial: ${slot.ttyName} read error: ${e.message}"); break
         }
-        if (n > 0) writeFully(slot, buf, n)
+        if (n > 0) writeFully(slot, masterJfd, buf, n)
       }
     }, "ttyusb-rx-${slot.ttyName}").apply { isDaemon = true }
 
-    // pty -> chip, polled so it never blocks forever on the master (clean release).
+    // pty -> chip, polled so detach (master close) releases the thread promptly.
     val tx = Thread({
-      val pfd = StructPollfd().apply {
-        fd = slot.masterJfd
-        events = OsConstants.POLLIN.toShort()
-      }
+      val pollfd = StructPollfd().apply { fd = masterJfd; events = OsConstants.POLLIN.toShort() }
       val buf = ByteArray(4096)
       while (slot.running) {
-        applyParamsIfChanged(slot)
-        pfd.revents = 0
-        val ready = try { Os.poll(arrayOf(pfd), 200) } catch (e: Exception) { break }
+        pollfd.revents = 0
+        val ready = try { Os.poll(arrayOf(pollfd), 200) } catch (e: Exception) { break }
         if (!slot.running) break
-        if (ready > 0 && (pfd.revents.toInt() and OsConstants.POLLIN) != 0) {
-          val n = try { Os.read(slot.masterJfd, buf, 0, buf.size) } catch (e: Exception) { break }
+        if (ready > 0 && (pollfd.revents.toInt() and OsConstants.POLLIN) != 0) {
+          val n = try { Os.read(masterJfd, buf, 0, buf.size) } catch (e: Exception) { break }
           if (n <= 0) break
           runCatching { slot.port?.write(buf.copyOf(n), 1000) }
         }
@@ -318,19 +292,18 @@ object UsbSerialBridge {
     rx.start(); tx.start()
   }
 
-  private fun writeFully(slot: Slot, buf: ByteArray, len: Int) {
+  private fun writeFully(slot: Slot, masterJfd: java.io.FileDescriptor, buf: ByteArray, len: Int) {
     var off = 0
     while (slot.running && off < len) {
-      val w = try { Os.write(slot.masterJfd, buf, off, len - off) } catch (e: Exception) { return }
+      val w = try { Os.write(masterJfd, buf, off, len - off) } catch (e: Exception) { return }
       if (w <= 0) return
       off += w
     }
   }
 
-  /** Read the guest's PTY termios and program the chip when it changes. */
-  private fun applyParamsIfChanged(slot: Slot) {
+  private fun applyParamsIfChanged(slot: Slot, masterFd: Int) {
     val port = slot.port ?: return
-    val p = runCatching { Pty.serialParams(slot.masterFd) }.getOrNull() ?: return
+    val p = runCatching { Pty.serialParams(masterFd) }.getOrNull() ?: return
     if (p.contentEquals(slot.lastParams)) return
     slot.lastParams = p
     val parity = when (p[3]) {
