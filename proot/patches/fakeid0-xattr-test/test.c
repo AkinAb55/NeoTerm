@@ -56,6 +56,15 @@ int main(int argc, char** argv) {
     CHECK(owner==114 && group==114, "stat-as-ROOT sees owner 114      (pg_ctlcluster: 'not root' passes!)");
     CHECK(mode==0700, "mode preserved across chown (got %o)", mode);
 
+    /* regression: write_meta on a not-yet-existent path (the mkdir/creat ENTER
+     * case) must be NON-FATAL — else handle_mk propagates -1 == EPERM and the
+     * guest mkdir fails ("install: cannot create directory: Operation not permitted"). */
+    {
+        char nope[PATH_MAX]; strcpy(nope, "/no/such/dir/deadbeef/x");
+        int rc = write_meta_file(nope, 0755, 0, 0, true, &root);
+        CHECK(rc == 0, "write_meta on non-existent path is non-fatal (rc=%d)", rc);
+    }
+
     printf("\n%s (%d failures)\n", fails? "*** TESTS FAILED ***":"ALL TESTS PASSED", fails);
     return fails?1:0;
 }

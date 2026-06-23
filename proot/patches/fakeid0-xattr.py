@@ -75,10 +75,11 @@ write_meta_new = r'''int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t
 	len = snprintf(buf, sizeof(buf), "%d\n%d\n%d\n", dtoo(mode), owner, group);
 	if(len <= 0 || (size_t) len >= sizeof(buf))
 		return -1;
-	/* Non-fatal: if the fs/SELinux rejects the xattr the guest syscall still
-	 * returns success, we just lose persistence for that file. */
-	if(setxattr(path, XATTR_META_NAME, buf, len, 0) != 0)
-		return -1;
+	/* Non-fatal: write_meta is also called at syscall ENTER for mkdir/creat,
+	 * when the target does not exist yet (setxattr -> ENOENT), and the fs/SELinux
+	 * may reject it. The guest syscall must still succeed; chown persists the
+	 * owner later, when the file exists. */
+	setxattr(path, XATTR_META_NAME, buf, len, 0);
 	return 0;
 }
 
@@ -99,10 +100,17 @@ s = s.replace('int path_exists(char path[PATH_MAX]);',
               'int path_exists(char path[PATH_MAX]);\nint meta_exists(char path[PATH_MAX]);', 1)
 wr(hh, s)
 
-# ---- chown.c / open.c / stat.c : path_exists(meta_path) -> meta_exists ----
-for f,n in [("chown.c",1),("open.c",1),("stat.c",1)]:
-    p=FK+f; s=rd(p); c=s.count('path_exists(meta_path)')
-    must(c>=n, "%s has path_exists(meta_path)"%f)
+# ---- chown.c: drop the "no meta -> skip" early-return so chown ALWAYS persists
+#      (by chown time the file exists, so the xattr write in write_meta succeeds) ----
+cf=FK+"chown.c"; s=rd(cf)
+old_cf="\tif(path_exists(meta_path) != 0)\n\t\treturn 0;\n"
+must(old_cf in s, "chown.c early-return block")
+s=s.replace(old_cf, "\t/* xattr-backed: always persist ownership on chown. */\n", 1)
+wr(cf, s)
+# ---- open.c / stat.c: path_exists(meta_path) -> meta_exists(meta_path) ----
+for f in ["open.c","stat.c"]:
+    p=FK+f; s=rd(p)
+    must('path_exists(meta_path)' in s, "%s path_exists(meta_path)"%f)
     s=s.replace('path_exists(meta_path)','meta_exists(meta_path)')
     wr(p,s)
 
