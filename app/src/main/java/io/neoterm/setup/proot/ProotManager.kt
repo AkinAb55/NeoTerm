@@ -166,6 +166,14 @@ object ProotManager {
     bind(args, "/dev")
     bind(args, "/proc")
     bind(args, "/sys")
+    // Hide Android's SELinux from the guest. Android mounts selinuxfs at
+    // /sys/fs/selinux, so the distro's SELinux-aware tools (su / PAM, runuser,
+    // login, sudo, cron, sshd) think SELinux is enabled and abort in libselinux's
+    // AVC ("avc_context_to_sid_raw: Assertion `avc_running' failed"). Masking it
+    // with an empty dir (no `enforce`) makes is_selinux_enabled() false, so they
+    // skip SELinux entirely. Bound after /sys so it overrides.
+    val selinuxMask = File("${NeoTermPath.PROOT_ROOT_PATH}/selinux-mask").apply { mkdirs() }
+    bind(args, selinuxMask.absolutePath, "/sys/fs/selinux")
     bind(args, "/dev/pts")
     bind(args, "/proc/self/fd", "/dev/fd")
     bind(args, "/proc/self/fd/0", "/dev/stdin")
