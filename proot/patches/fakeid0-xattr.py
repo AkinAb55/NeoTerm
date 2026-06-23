@@ -144,6 +144,30 @@ new_o=("\t\tmode = peek_reg(tracee, ORIGINAL, mode_sysarg);\n"
        "\t\treturn 0;")
 must(old_o in s, "open.c new-file block"); s=s.replace(old_o,new_o,1); wr(of,s)
 
+# ---- open.c: the /dev/kmsg writable buffer (NeoTerm binds a regular file over
+#      /dev/kmsg so dmesg works) must behave like the kernel ring buffer: every
+#      write APPENDS and O_TRUNC is ignored, otherwise `echo x > /dev/kmsg` (the
+#      common idiom) would truncate the buffer and dmesg would only ever show the
+#      last message. Force O_APPEND + drop O_TRUNC when opening that path. No-op
+#      for every other path, so it cannot affect unrelated files. ----
+ok=FK+"open.c"; s=rd(ok)
+if '#include <string.h>' not in s:
+    s=s.replace('#include <fcntl.h>', '#include <fcntl.h>\n#include <string.h>', 1)
+must('#include <string.h>' in s, "open.c string.h include")
+kanchor='\t\tflags = O_CREAT;'
+must(kanchor in s, "open.c flags=O_CREAT anchor")
+kinject=('\t\tflags = O_CREAT;\n'
+         '\t/* NeoTerm: /dev/kmsg backing file -> kernel-ring-buffer semantics. */\n'
+         '\tif (flags_sysarg != IGNORE_SYSARG) {\n'
+         '\t\tsize_t _kl = strlen(orig_path);\n'
+         '\t\tif ((_kl >= 9  && strcmp(orig_path + _kl - 9,  "/dev/kmsg") == 0) ||\n'
+         '\t\t    (_kl >= 13 && strcmp(orig_path + _kl - 13, "/sysdata/kmsg") == 0)) {\n'
+         '\t\t\tflags = (flags & ~O_TRUNC) | O_APPEND;\n'
+         '\t\t\tpoke_reg(tracee, flags_sysarg, flags);\n'
+         '\t\t}\n'
+         '\t}')
+s=s.replace(kanchor, kinject, 1); wr(ok, s)
+
 # ---- mk.c: mkdir/mknod defers the meta write to EXIT ----
 mf=FK+"mk.c"; s=rd(mf)
 old_m=("\tmode = peek_reg(tracee, ORIGINAL, mode_sysarg);\n"

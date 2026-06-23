@@ -193,6 +193,20 @@ object ProotManager {
     val shmDir = File("${NeoTermPath.PROOT_ROOT_PATH}/shm").apply { mkdirs() }
     bind(args, shmDir.absolutePath, "/dev/shm")
     bind(args, "/dev/urandom", "/dev/random")
+    // Writable /dev/kmsg buffer: Android blocks the real kernel ring buffer, so
+    // bind a regular file the guest can write to and our dmesg shim reads back.
+    // The proot patch forces O_APPEND on this path (kernel-ring-buffer semantics).
+    val kmsgBuf = File("${NeoTermPath.PROOT_ROOT_PATH}/sysdata").apply { mkdirs() }.let { File(it, "kmsg") }
+    runCatching {
+      if (!kmsgBuf.exists()) {
+        kmsgBuf.writeText("")
+      } else if (kmsgBuf.length() > 256 * 1024) {
+        // O_APPEND-del a puffer nőne; induláskor sapkázzuk az utolsó ~64 KB-ra.
+        val all = kmsgBuf.readBytes()
+        kmsgBuf.writeBytes(all.copyOfRange((all.size - 64 * 1024).coerceAtLeast(0), all.size))
+      }
+    }
+    bind(args, kmsgBuf.absolutePath, "/dev/kmsg")
 
     // Fake /proc fájlok (proot-distro sysdata mintájára): az Android korlátozott
     // /proc-ja miatt a ps/top/uptime/free hibára futna ("Unable to get system

@@ -54,15 +54,43 @@ esac
 """
 
   private const val DMESG = """#!/bin/sh
-# Minimal dmesg proot-hoz: Android tiltja a kernel ring buffert, ezért egy rövid
-# boot-logot adunk. Robusztus (nem függ awk-tól / /proc/mounts-tól), és a
-# kernel-sor a VALÓDI kernel (uname), hogy egyezzen az `uname -a`-val. NeoTerm.
-emit() { printf '[%11.6f] %s\n' "${'$'}2" "${'$'}1"; }
+# dmesg proot-hoz: a valódi kernel ring buffer tiltott Androidon, ezért a guest
+# egy ÍRHATÓ /dev/kmsg pufferbe ír (echo msg > /dev/kmsg), ezt olvassuk vissza.
+# A puffer akkumulál: a proot-patch O_APPEND-et kényszerít a /dev/kmsg-re, így a
+# csonkoló `>` sem veszít üzenetet (a törlés ezért truncate-tel megy). NeoTerm.
+KMSG=/dev/kmsg
+clear=0; follow=0; notime=0
+for a in "${'$'}@"; do
+  case "${'$'}a" in
+    -C|--clear)      truncate -s 0 "${'$'}KMSG" 2>/dev/null; exit 0 ;;
+    -c|--read-clear) clear=1 ;;
+    -w|--follow|-W|--follow-new) follow=1 ;;
+    -t|--notime)     notime=1 ;;
+    --version)       echo "dmesg (NeoTerm proot kmsg shim)"; exit 0 ;;
+    -h|--help)       echo "Usage: dmesg [-c|-C|-w|-t ...] - NeoTerm proot kmsg buffer"; exit 0 ;;
+    -*)              : ;;
+  esac
+done
 up=${'$'}(cut -d' ' -f1 /proc/uptime 2>/dev/null || echo 0)
-emit "Linux ${'$'}(uname -r 2>/dev/null || echo unknown) - NeoTerm proot userland (fake root -0, xattr ownership)" 0.000000
-emit "Command line: BOOT_IMAGE=proot quiet" 0.000100
-emit "Mounts: / /proc /sys /dev /dev/pts /dev/shm /tmp" 0.000200
-emit "NeoTerm runtime (uptime): ${'$'}{up}s" "${'$'}up"
+emit() { printf '[%11.6f] %s\n' "${'$'}2" "${'$'}1"; }
+banner() {
+  emit "Linux ${'$'}(uname -r 2>/dev/null || echo unknown) - NeoTerm proot userland (fake root -0)" 0.000000
+  emit "kmsg buffer: ${'$'}KMSG  (write: echo msg > /dev/kmsg)" 0.000100
+}
+fmt() {
+  while IFS= read -r ln; do
+    m=${'$'}{ln#<*>}
+    if [ "${'$'}notime" = 1 ]; then printf '%s\n' "${'$'}m"; else emit "${'$'}m" "${'$'}up"; fi
+  done
+}
+banner
+if [ "${'$'}follow" = 1 ]; then
+  { [ -f "${'$'}KMSG" ] && tail -n +1 -f "${'$'}KMSG"; } 2>/dev/null | fmt
+else
+  [ -f "${'$'}KMSG" ] && fmt < "${'$'}KMSG"
+  [ "${'$'}clear" = 1 ] && truncate -s 0 "${'$'}KMSG" 2>/dev/null
+fi
+exit 0
 """
 
   private const val NOOP = "#!/bin/sh\nexit 0\n"
