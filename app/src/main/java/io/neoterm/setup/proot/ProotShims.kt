@@ -111,6 +111,10 @@ if [ "${'$'}(id -u 2>/dev/null)" = 0 ]; then
   [ -e /etc/group ]   && chmod 644 /etc/group   2>/dev/null
   [ -e /etc/shadow ]  && chmod 640 /etc/shadow  2>/dev/null
   [ -e /etc/gshadow ] && chmod 640 /etc/gshadow 2>/dev/null
+  # Runtime lock dir: picocom/minicom/cu create UUCP lock files here; minimal
+  # rootfs (no systemd) may lack it -> "cannot lock /dev/ttyUSB0: Permission denied".
+  mkdir -p /run/lock 2>/dev/null && chmod 1777 /run/lock 2>/dev/null
+  [ -e /var/lock ] || ln -s /run/lock /var/lock 2>/dev/null
 fi
 """
 
