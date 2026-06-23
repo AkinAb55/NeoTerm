@@ -164,6 +164,7 @@ final class TerminalRenderer {
       boolean lastRunFontWidthMismatch = false;
       boolean lastRunMissingGlyph = false;
       boolean lastRunLineDraw = false;
+      boolean lastRunEmoji = false;
       int currentCharIndex = 0;
       float measuredWidthForRun = 0.f;
 
@@ -194,6 +195,10 @@ final class TerminalRenderer {
         // into the exact cell, gap-free, instead of using the font glyph.
         final boolean lineDraw = codePointWcWidth > 0 && LineBlockCharacters.canDraw(codePoint);
         final boolean missingGlyph = !lineDraw && codePointWcWidth > 0 && !fontHasGlyph(codePoint);
+        // Colour emoji (drawn via the system emoji font) get their own run, so each is scaled and
+        // clipped to its own cell box. Noto draws some emoji (e.g. the ♀/♂ gender signs) with ink
+        // wider than their advance; sharing a run would let that ink overlap the next emoji.
+        final boolean emoji = missingGlyph && isEmojiCodepoint(codePoint);
         // For a present glyph use the real measured width (so non-monospace and
         // wide glyphs are scaled to their cell); for a missing one the user font's
         // measure is meaningless (often the .notdef/tofu advance, sometimes 0), so
@@ -204,7 +209,7 @@ final class TerminalRenderer {
           : mTextPaint.measureText(line, currentCharIndex, charsForCodePoint);
         final boolean fontWidthMismatch = Math.abs(measuredCodePointWidth / mFontWidth - codePointWcWidth) > 0.01;
 
-        if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideUrl != lastRunUrl || underlineColor != lastRunUnderlineColor || fontWidthMismatch || lastRunFontWidthMismatch || missingGlyph != lastRunMissingGlyph || lineDraw != lastRunLineDraw) {
+        if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideUrl != lastRunUrl || underlineColor != lastRunUnderlineColor || fontWidthMismatch || lastRunFontWidthMismatch || missingGlyph != lastRunMissingGlyph || lineDraw != lastRunLineDraw || emoji || lastRunEmoji) {
           if (column == 0) {
             // Skip first column as there is nothing to draw, just record the current style.
           } else {
@@ -225,6 +230,7 @@ final class TerminalRenderer {
           lastRunFontWidthMismatch = fontWidthMismatch;
           lastRunMissingGlyph = missingGlyph;
           lastRunLineDraw = lineDraw;
+          lastRunEmoji = emoji;
         }
         measuredWidthForRun += measuredCodePointWidth;
         column += codePointWcWidth;
@@ -482,6 +488,8 @@ final class TerminalRenderer {
       right *= mes / runWidthColumns;
       savedMatrix = true;
     }
+    // Cell box for clipping the glyph (captured before the bar-cursor shrinks `right`).
+    final float clipLeft = left, clipRight = right;
 
     if (backColor != palette[TextStyle.COLOR_INDEX_BACKGROUND]) {
       // Only draw non-default backgroundColor.
@@ -551,6 +559,13 @@ final class TerminalRenderer {
       // painted gap-free by us instead of using the (often misaligned) font glyph.
       if (lineDraw) {
         drawLineDrawRun(canvas, text, startCharIndex, runWidthChars, startColumn, y, foreColor, bold);
+      } else if (fallbackFont) {
+        // Confine the (often over-wide) fallback/emoji glyph ink to this run's cells so it can't
+        // bleed over the neighbouring glyph. Each emoji is its own run (see the 'emoji' flag).
+        canvas.save();
+        canvas.clipRect(clipLeft, y - mFontLineSpacingAndAscent + mFontAscent, clipRight, y);
+        canvas.drawText(text, startCharIndex, runWidthChars, left, y - mFontLineSpacingAndAscent, mTextPaint);
+        canvas.restore();
       } else {
         canvas.drawText(text, startCharIndex, runWidthChars, left, y - mFontLineSpacingAndAscent, mTextPaint);
       }
