@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.view.Gravity
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -20,6 +21,11 @@ class App : Application() {
   override fun onCreate() {
     super.onCreate()
     app = this
+    // Az app-folyamat indulási pillanata (elapsedRealtime alap). Ebből számoljuk
+    // a guest /proc/uptime-ját: a NeoTerm futásidejét adja vissza, és amikor az app
+    // teljesen leáll (a folyamat meghal), ez a statikus mező újrainicializálódik
+    // → a „uptime" nullázódik a következő indításnál.
+    startElapsedRealtimeMs = SystemClock.elapsedRealtime()
     NeoPreference.init(this)
     CrashHandler.init()
     NeoInitializer.init(this)
@@ -68,6 +74,12 @@ class App : Application() {
 
   companion object {
     private var app: App? = null
+
+    /** Az app-folyamat indulási ideje (SystemClock.elapsedRealtime, ms). A guest
+     *  uptime ehhez képest számolódik; a folyamat halálával 0-ra áll vissza. */
+    @JvmStatic
+    var startElapsedRealtimeMs: Long = 0L
+      private set
 
     fun get(): App {
       return app!!

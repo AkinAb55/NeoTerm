@@ -155,6 +155,10 @@ object ProotManager {
     // Gondoskodunk róla, hogy a login shell betöltse a ~/.bashrc-t (lásd lent).
     ensureLoginSourcesBashrc(distro)
 
+    // Guest-oldali kompat-shimek (systemctl/dmesg/journalctl/loginctl) a
+    // rootfs /usr/local/bin-jébe — minden indításkor frissítve.
+    ProotShims.install(rootfs)
+
     val args = ArrayList<String>(48)
     args.add("proot")
     args.add("--kill-on-exit")     // a teljes process-fa meghal a tracee után

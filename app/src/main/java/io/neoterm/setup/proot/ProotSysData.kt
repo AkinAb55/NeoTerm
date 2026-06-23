@@ -1,6 +1,7 @@
 package io.neoterm.setup.proot
 
 import android.os.SystemClock
+import io.neoterm.App
 import io.neoterm.component.config.NeoTermPath
 import java.io.File
 
@@ -212,22 +213,40 @@ unevictable_pgs_stranded 0
   )
 
   /**
-   * Valós `/proc/uptime` tartalom Android API-ból: első mező az eszköz tényleges
-   * uptime-ja másodpercben ([SystemClock.elapsedRealtime], mély alvással együtt),
-   * a második az idle-idő közelítése (uptime × magszám). A fájl statikus, így a
-   * session indulásakor pontos, és menet közben nem „ketyeg" tovább.
+   * `/proc/uptime` tartalom: a **NeoTerm futásideje** másodpercben (az app-folyamat
+   * indulása óta, [App.startElapsedRealtimeMs]). Így a guest „uptime"-ja az
+   * elindítása óta eltelt időt mutatja, és amikor az app teljesen leáll, a
+   * következő indításkor nulláról indul — szemben az eszköz-uptime-mal, ami
+   * megtévesztően nagy/független érték lenne. Ha az app-start valamiért nincs még
+   * beállítva, az eszköz-uptime a tartalék. A fájl statikus (proot bind), így a
+   * session indulásakor pontos, menet közben nem „ketyeg" tovább.
+   * Második mező: idle-idő közelítése (uptime × magszám).
    */
   private fun uptimeContent(): String {
-    val up = SystemClock.elapsedRealtime() / 1000.0
+    val now = SystemClock.elapsedRealtime()
+    val appStart = App.startElapsedRealtimeMs
+    // app-runtime, ha az app-start érvényes (1..now); különben az eszköz-uptime.
+    val upMs = if (appStart in 1L..now) now - appStart else now
+    val up = upMs / 1000.0
     val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     val idle = up * cores * 0.93
     return "%.2f %.2f\n".format(up, idle)
   }
 
-  /** A `/proc/stat` valódi `btime` (boot epoch) sorral — a beégetett dátum helyett. */
+  /**
+   * A `/proc/stat` `btime` (boot epoch) sora a NeoTerm indulásának falidejét adja,
+   * hogy egybevágjon az app-runtime alapú uptime-mal (`uptime`, `who -b`). Ha az
+   * app-start nincs beállítva, az eszköz boot-ideje a tartalék.
+   */
   private fun statContent(): String {
-    val btime = (System.currentTimeMillis() - SystemClock.elapsedRealtime()) / 1000
-    return STAT.replace(Regex("(?m)^btime .*$"), "btime $btime")
+    val appStart = App.startElapsedRealtimeMs
+    val btimeMs = if (appStart > 0L) {
+      // falidő = most − (app óta eltelt) = az app indulásának falideje
+      System.currentTimeMillis() - (SystemClock.elapsedRealtime() - appStart)
+    } else {
+      System.currentTimeMillis() - SystemClock.elapsedRealtime()
+    }
+    return STAT.replace(Regex("(?m)^btime .*$"), "btime ${btimeMs / 1000}")
   }
 
 }
