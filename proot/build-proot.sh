@@ -20,6 +20,8 @@
 # Kimenet: $DL_DIR/proot — statikus aarch64 Android ELF (kb. 1-2 MB).
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 DL_DIR="${1:?usage: build-proot.sh <download_dir>}"
 mkdir -p "${DL_DIR}"
 
@@ -329,6 +331,23 @@ else
   echo "[build-proot] WARN: fake_id0/stat.c nem található — ownership-patch kihagyva" >&2
 fi
 
+# ─── fake_id0: xattr-backed PERSISTENT ownership (+ -DUSERLAND below) ──────
+# A fenti euid-fix csak az initdb-féle `st_uid == geteuid()` ellenőrzést oldja
+# meg (hívófüggő). A Debian root-wrapperek (pg_ctlcluster: „must not be owned
+# by root") rootként statolnak, és a faked tulajdon hívófüggősége miatt rootot
+# látnak. Ehhez PERZISZTENS, hívófüggetlen tulajdon kell. A USERLAND meta-mód
+# ezt megadja, de fájlonként `.proot-meta-file.*` kísérőfájllal teleszórja a
+# rootfs-t. Ez a patch a meta-tárolást egy `user.proot.meta` xattr-be teszi a
+# fájlra magára → nulla kísérőfájl, ugyanaz a perzisztencia. A statx-ágat is
+# kiegészíti (a modern glibc `stat()` azt hívja). A tárolási logikát host-on
+# verifikáltuk: patches/fakeid0-xattr-test/run.sh.
+if [[ -f "${SCRIPT_DIR}/patches/fakeid0-xattr.py" ]]; then
+  echo "[build-proot] patch fake_id0 -> xattr-backed persistent ownership"
+  python3 "${SCRIPT_DIR}/patches/fakeid0-xattr.py" "${PROOT_SRC}"
+else
+  echo "[build-proot] HIBA: patches/fakeid0-xattr.py nem található" >&2; exit 8
+fi
+
 echo "[build-proot] make -C ${PROOT_SRC} (NDK cross-compile)"
 # A Termux fork néhány extension-ja (ashmem_memfd, fake_id0) missing-include-okat
 # tartalmaz amik NDK clang 18+ strict-mode-on (-Werror=implicit-function-declaration)
@@ -341,7 +360,7 @@ make -C "${PROOT_SRC}" -j"$(nproc)" \
     OBJDUMP="${OBJDUMP}" \
     STRIP="${NDK_BIN}/llvm-strip" \
     HOST_CC="cc" \
-    CFLAGS="-O2 ${TALLOC_INCLUDE_FLAG} -DGIT_VERSION=\"v${PROOT_VERSION}\" -Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion" \
+    CFLAGS="-O2 -DUSERLAND ${TALLOC_INCLUDE_FLAG} -DGIT_VERSION=\"v${PROOT_VERSION}\" -Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion" \
     LDFLAGS="-L${TALLOC_OUT} -ltalloc -static-libgcc -Wl,-z,noexecstack" \
     proot
 
