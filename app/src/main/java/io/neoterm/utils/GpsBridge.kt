@@ -84,11 +84,13 @@ object GpsBridge {
       != PackageManager.PERMISSION_GRANTED
     ) return
     running = true
+    io.neoterm.setup.proot.Kmsg.log("gpsd: GPS server starting on 127.0.0.1:$PORT")
     appContext = context.applicationContext
     serverThread = Thread({ serverLoop() }, "gpsd-bridge").apply { isDaemon = true; start() }
   }
 
   fun stop() {
+    val was = running
     running = false
     runCatching { serverSocket?.close() }
     serverSocket = null
@@ -96,6 +98,7 @@ object GpsBridge {
     for (c in clients) runCatching { c.socket.close() }
     clients.clear()
     stopLocation()
+    if (was) io.neoterm.setup.proot.Kmsg.log("gpsd: GPS server stopped")
   }
 
   fun restart(context: Context) {

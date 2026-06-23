@@ -81,16 +81,19 @@ object CameraBridge {
     ) return
 
     running = true
+    io.neoterm.setup.proot.Kmsg.log("camera: MJPEG server starting on 127.0.0.1:$PORT/video.mjpeg")
     appContext = context.applicationContext
     serverThread = Thread({ serverLoop() }, "camera-bridge").apply { isDaemon = true; start() }
   }
 
   fun stop() {
+    val was = running
     running = false
     runCatching { serverSocket?.close() }
     serverSocket = null
     serverThread = null
     closeCamera()
+    if (was) io.neoterm.setup.proot.Kmsg.log("camera: MJPEG server stopped")
   }
 
   /** Restart after the CAMERA permission is granted or the toggle changes. */

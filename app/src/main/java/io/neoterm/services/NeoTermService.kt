@@ -167,6 +167,7 @@ class NeoTermService : Service() {
         Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT
       )
     }
+    if (!x11Running) io.neoterm.setup.proot.Kmsg.log("x11: embedded X server up (DISPLAY=:0)")
     x11Running = true
     updateNotification()
   }
@@ -176,6 +177,7 @@ class NeoTermService : Service() {
       runCatching { unbindService(x11Connection) }
       x11Bound = false
     }
+    if (x11Running) io.neoterm.setup.proot.Kmsg.log("x11: embedded X server down")
     x11Running = false
     updateNotification()
   }
@@ -196,6 +198,7 @@ class NeoTermService : Service() {
     val indexOfRemoved = mTerminalSessions.indexOf(sessionToRemove)
     if (indexOfRemoved >= 0) {
       mTerminalSessions.removeAt(indexOfRemoved)
+      io.neoterm.setup.proot.Kmsg.log("neoterm: terminal session ended (active: ${mTerminalSessions.size})")
       updateNotification()
       stopSelfIfNoSessions()
     }
@@ -264,6 +267,7 @@ class NeoTermService : Service() {
       NLog.d("createOrFindSession: creating new session")
       val session = Terminals.createSession(this, parameter)
       mTerminalSessions.add(session)
+      io.neoterm.setup.proot.Kmsg.log("neoterm: new terminal session (active: ${mTerminalSessions.size})")
       return session
     }
 

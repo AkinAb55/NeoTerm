@@ -29,6 +29,7 @@ object PulseAudioBridge {
   fun start(context: Context) {
     if (running) return
     running = true
+    io.neoterm.setup.proot.Kmsg.log("pulseaudio: sound server starting on 127.0.0.1:4713")
     val app = context.applicationContext
     // Extraction + launch off the caller's thread (e.g. the service onCreate).
     thread = Thread({
@@ -42,10 +43,12 @@ object PulseAudioBridge {
   }
 
   fun stop() {
+    val was = running
     running = false
     runCatching { paProcess?.destroy() }
     paProcess = null
     thread = null
+    if (was) io.neoterm.setup.proot.Kmsg.log("pulseaudio: sound server stopped")
   }
 
   /**
