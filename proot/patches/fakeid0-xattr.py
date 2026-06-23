@@ -212,6 +212,19 @@ for name in ["LINK2SYMLINK_RENAME","LINK2SYMLINK_UNLINK"]:
     must(s2!=s, name); s=s2
 wr(ff, s)
 
+# ---- fake_id0.c: USERLAND fstat() resolves the fd via readlinkat(/proc/pid/fd/N).
+#      For a socket / pipe / anon_inode / eventfd / timerfd / memfd, that link is
+#      NOT a filesystem path ("socket:[12345]", "anon_inode:[eventfd]", "[timerfd]"
+#      ...), yet the code then chained newfstatat(AT_FDCWD, <that>, ...) -> ENOENT,
+#      so fstat(2) on ANY socket failed (e.g. the Ruby pg / PostgreSQL client:
+#      "No such file or directory - fstat(2)"). A real file from /proc/pid/fd
+#      always starts with '/'; anything else must fall back to a plain re-issued
+#      fstat, exactly like the existing "pipe"/" (deleted)" special-cases. ----
+gf=FK+"fake_id0.c"; s=rd(gf)
+old_fd='if ((strcmp(path + strlen(path) - strlen(" (deleted)"), " (deleted)") == 0) || (strncmp(path, "pipe", 4) == 0)) {'
+new_fd='if ((path[0] != \'/\') || (strcmp(path + strlen(path) - strlen(" (deleted)"), " (deleted)") == 0) || (strncmp(path, "pipe", 4) == 0)) {'
+must(old_fd in s, "fake_id0.c fstat readlinkat condition"); s=s.replace(old_fd,new_fd,1); wr(gf,s)
+
 # ---- stat.c : statx handler reads the xattr; add include ----
 sp=FK+"stat.c"; s=rd(sp)
 if '#include <sys/xattr.h>' not in s:
