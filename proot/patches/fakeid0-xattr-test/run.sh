@@ -10,7 +10,7 @@ PATCH="${HERE}/../fakeid0-xattr.py"
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/extension/fake_id0"
 base="https://raw.githubusercontent.com/termux/proot/master/src/extension/fake_id0"
-for f in helper_functions.c helper_functions.h chown.c open.c stat.c; do
+for f in helper_functions.c helper_functions.h chown.c open.c stat.c rename.c unlink.c fake_id0.c; do
   curl -fsSL --retry 3 "$base/$f" -o "$WORK/extension/fake_id0/$f"
 done
 python3 "$PATCH" "$WORK"

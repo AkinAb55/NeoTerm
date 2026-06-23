@@ -114,6 +114,42 @@ for f in ["open.c","stat.c"]:
     s=s.replace('path_exists(meta_path)','meta_exists(meta_path)')
     wr(p,s)
 
+# ---- rename.c: the xattr travels with the inode on rename(2); drop the meta
+#      "copy", whose unlink(meta_path) now == unlink(the real file) -> ENOENT ----
+rf=FK+"rename.c"; s=rd(rf)
+rn_new=("\t/* xattr-backed: the user.proot.meta xattr travels with the inode on rename(2),\n"
+        "\t * so there is nothing to copy. (The old sidecar logic did unlink(meta_path),\n"
+        "\t * which now == the real file -> it would delete the file before the rename.) */\n"
+        "\t(void) meta_path; (void) uid; (void) gid; (void) mode;\n"
+        "\treturn 0;\n")
+rn_pat=r'\t// If a meta file exists.*?return write_meta_file\(meta_path, mode, uid, gid, 0, config\);[ \t]*\n'
+s2=re.sub(rn_pat, lambda _m: rn_new, s, count=1, flags=re.S)
+must(s2!=s, "rename.c meta block")
+wr(rf, s2)
+
+# ---- unlink.c: the meta xattr dies with the inode on real unlink(2); the old
+#      unlink(meta_path) now == unlink(the real file) before the syscall ----
+uf=FK+"unlink.c"; s=rd(uf)
+up=r'\tif\(path_exists\(meta_path\) == 0\)[ \t]*\n\t\tunlink\(meta_path\);\n'
+un=("\t/* xattr-backed: the meta xattr is part of the inode and is removed with it\n"
+    "\t * by the real unlink(2); unlinking meta_path (== the real file) would delete it. */\n"
+    "\t(void) meta_path;\n")
+s2=re.sub(up, lambda _m: un, s, count=1, flags=re.S)
+must(s2!=s, "unlink.c meta block"); wr(uf, s2)
+
+# ---- fake_id0.c: LINK2SYMLINK_RENAME/_UNLINK move/delete the meta; with xattr
+#      that hits the real file (link2symlink already moved/removed the inode) ----
+ff=FK+"fake_id0.c"; s=rd(ff)
+for name in ["LINK2SYMLINK_RENAME","LINK2SYMLINK_UNLINK"]:
+    pat=r'case '+name+r': \{.*?\n\t\}\n'
+    rep=("case "+name+":\n"
+         "\t\t/* xattr-backed: ownership lives in the inode's xattr, which link2symlink's\n"
+         "\t\t * real rename/unlink already carries/removes. Nothing to do. */\n"
+         "\t\treturn 0;\n")
+    s2=re.sub(pat, lambda _m,_r=rep: _r, s, count=1, flags=re.S)
+    must(s2!=s, name); s=s2
+wr(ff, s)
+
 # ---- stat.c : statx handler reads the xattr; add include ----
 sp=FK+"stat.c"; s=rd(sp)
 if '#include <sys/xattr.h>' not in s:
