@@ -345,6 +345,8 @@ public final class TerminalEmulator {
   private byte mUtf8ToFollow, mUtf8Index;
   private final byte[] mUtf8InputBuffer = new byte[4];
   private int mLastEmittedCodePoint = -1;
+  /** Count of consecutive regional-indicator code points emitted, so flags pair up (see emitCodePoint). */
+  private int mRegionalIndicatorCount = 0;
 
   public final TerminalColors mColors = new TerminalColors();
 
@@ -2442,6 +2444,7 @@ public final class TerminalEmulator {
    * @param codePoint The code point of the character to display
    */
   private void emitCodePoint(int codePoint) {
+    final int prevCodePoint = mLastEmittedCodePoint;
     mLastEmittedCodePoint = codePoint;
     if (mUseLineDrawingUsesG0 ? mUseLineDrawingG0 : mUseLineDrawingG1) {
       // http://www.vt100.net/docs/vt102-ug/table5-15.html.
@@ -2549,7 +2552,21 @@ public final class TerminalEmulator {
     }
 
     final boolean autoWrap = isDecsetInternalBitSet(DECSET_BIT_AUTOWRAP);
-    final int displayWidth = WcWidth.width(codePoint);
+    int displayWidth = WcWidth.width(codePoint);
+
+    // Grapheme clustering: emoji code points that join the previous cell are laid out width 0 so a
+    // multi-code-point emoji occupies one cluster (cell) instead of spilling into extra columns and
+    // overlapping the next glyph. The renderer applies the same rule (WcWidth.joinsPreviousGrapheme)
+    // when it re-derives widths, so the two stay in sync.
+    final boolean isRegionalIndicator = codePoint >= 0x1F1E6 && codePoint <= 0x1F1FF;
+    if (displayWidth > 0 && WcWidth.joinsPreviousGrapheme(prevCodePoint, codePoint)) {
+      displayWidth = 0;
+    } else if (isRegionalIndicator && (mRegionalIndicatorCount & 1) == 1) {
+      // Second regional indicator of a pair forms one flag with the first -> width 0.
+      displayWidth = 0;
+    }
+    // Track runs of regional indicators so flags pair up (reset by any other code point).
+    mRegionalIndicatorCount = isRegionalIndicator ? mRegionalIndicatorCount + 1 : 0;
     // VS16 (U+FE0F) after a width-1 base makes it emoji-presentation, which apps
     // count as width 2. Promote: append the selector to the base cell (combining,
     // below) and consume one extra column so the cursor stays in sync.

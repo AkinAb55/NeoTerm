@@ -229,10 +229,21 @@ final class TerminalRenderer {
         measuredWidthForRun += measuredCodePointWidth;
         column += codePointWcWidth;
         currentCharIndex += charsForCodePoint;
-        while (currentCharIndex < charsUsedInLine && WcWidth.width(line, currentCharIndex) <= 0) {
-          // Eat combining chars so that they are treated as part of the last non-combining code point,
-          // instead of e.g. being considered inside the cursorColor in the next run.
-          currentCharIndex += Character.isHighSurrogate(line[currentCharIndex]) ? 2 : 1;
+        // Eat combining chars AND grapheme-joined code points (ZWJ emoji, skin-tone modifiers) so
+        // they belong to the preceding cell's run and are drawn as one shaped cluster, matching how
+        // the emulator stored them width-0 (same WcWidth.joinsPreviousGrapheme rule, or the cluster
+        // would be split and overlap the next glyph).
+        int prevClusterCp = codePoint;
+        while (currentCharIndex < charsUsedInLine) {
+          final char nc = line[currentCharIndex];
+          final boolean ncHigh = Character.isHighSurrogate(nc);
+          final int ncCp = ncHigh ? Character.toCodePoint(nc, line[currentCharIndex + 1]) : nc;
+          if (WcWidth.width(ncCp) <= 0 || WcWidth.joinsPreviousGrapheme(prevClusterCp, ncCp)) {
+            currentCharIndex += ncHigh ? 2 : 1;
+            prevClusterCp = ncCp;
+          } else {
+            break;
+          }
         }
       }
 
