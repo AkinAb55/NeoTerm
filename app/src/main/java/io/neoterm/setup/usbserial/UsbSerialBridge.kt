@@ -43,7 +43,16 @@ object UsbSerialBridge {
   private const val POOL = 4
   private const val TAG = "UsbSerial"
 
-  private val sysBase = File("${NeoTermPath.PROOT_ROOT_PATH}/ttyusb-sys")
+  // Bound onto the guest's /sys/class/tty (Android SELinux blocks readdir of the
+  // real one), so ls / pyserial can enumerate the ports. Populated per attach.
+  private val sysClassTty = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-class-tty")
+
+  /** Host dir to bind onto /sys/class/tty, or null if usb-serial is disabled. */
+  fun sysfsBind(): String? {
+    if (!NeoPreference.isUsbSerialEnabled()) return null
+    if (!sysClassTty.isDirectory && !sysClassTty.mkdirs()) return null
+    return sysClassTty.absolutePath
+  }
 
   private class Slot(val ttyName: String, val index: Int) {
     @Volatile var running = false
@@ -174,7 +183,7 @@ object UsbSerialBridge {
     runCatching { slot.port?.close() }
     runCatching { slot.conn?.close() }
     runCatching { slot.pfd?.close() }   // -> guest read returns EOF
-    deleteRec(File(sysBase, slot.ttyName))
+    deleteRec(File(sysClassTty, slot.ttyName))
     slot.port = null
     slot.conn = null
     slot.pfd = null
@@ -209,11 +218,6 @@ object UsbSerialBridge {
       "LIST" -> {
         val active = synchronized(this) { slots.filter { it.slavePath != null }.map { it.ttyName } }
         reply(if (active.isEmpty()) "-" else active.joinToString(" "))
-      }
-      "SYSPATH" -> {
-        val tty = parts.getOrNull(1)
-        val slot = synchronized(this) { slots.firstOrNull { it.ttyName == tty && it.deviceName != null } }
-        reply(if (slot != null) File(sysBase, slot.ttyName).absolutePath else "NAK")
       }
       "GET", "SET", "BIS", "BIC", "BRK" -> handleModem(parts, ::reply)
       else -> reply("NAK")
@@ -331,11 +335,11 @@ object UsbSerialBridge {
   }
 
   // ── fake sysfs (/sys/class/tty/ttyUSB*) for pyserial / esptool enumeration ──
-  // The proot redirect maps /sys/class/tty/ttyUSB<n>[/...] to this host tree
-  // (queried via "SYSPATH"), and getdents injects the names into /sys/class/tty.
+  // This host dir is bound onto the guest's /sys/class/tty (see ProotManager) —
+  // Android SELinux blocks readdir of the real one. Each attach drops a port tree.
   private fun writeSysfs(slot: Slot, device: UsbDevice) {
     runCatching {
-      val dir = File(sysBase, slot.ttyName)
+      val dir = File(sysClassTty, slot.ttyName)
       deleteRec(dir)
       val dev = File(dir, "device").apply { mkdirs() }
       val vid = "%04x".format(device.vendorId)

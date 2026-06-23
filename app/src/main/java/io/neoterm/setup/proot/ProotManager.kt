@@ -213,6 +213,9 @@ object ProotManager {
     // make sure the app-side control/redirect server is up before the guest opens
     // them. A device can be (un)plugged any time during the session.
     io.neoterm.setup.usbserial.UsbSerialBridge.ensureReady()
+    // Bind a writable fake /sys/class/tty so the guest can readdir it (Android
+    // SELinux blocks the real one) — ls / pyserial enumerate the ports there.
+    io.neoterm.setup.usbserial.UsbSerialBridge.sysfsBind()?.let { bind(args, it, "/sys/class/tty") }
 
     // Fake /proc fájlok (proot-distro sysdata mintájára): az Android korlátozott
     // /proc-ja miatt a ps/top/uptime/free hibára futna ("Unable to get system
