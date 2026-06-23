@@ -1,6 +1,5 @@
 package io.neoterm.utils
 
-import android.graphics.Rect
 import android.view.View
 import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
@@ -27,8 +26,6 @@ class FullScreenHelper private constructor(
   }
 
   private val mChildOfContent: View
-  private var usableHeightPrevious: Int = 0
-  private val frameLayoutParams: FrameLayout.LayoutParams
 
   private var mOriginHeight: Int = 0
   private var mPreHeight: Int = 0
@@ -42,12 +39,15 @@ class FullScreenHelper private constructor(
     val content = activity.findViewById<FrameLayout>(android.R.id.content)
     mChildOfContent = content.getChildAt(0)
     mChildOfContent.viewTreeObserver.addOnGlobalLayoutListener {
-      if (this@FullScreenHelper.fullScreen) {
-        possiblyResizeChildOfContent()
-      }
+      // NOTE: the old AndroidBug5497 workaround (possiblyResizeChildOfContent) used to force a
+      // fixed pixel height on the content view while in full screen. The terminal now handles the
+      // soft keyboard itself, by panning content against the window insets (see the activity's
+      // OnApplyWindowInsetsListener), so that manual resize is redundant *and* conflicts with the
+      // inset-based layout — in full screen it collapsed the content to a fixed (often zero/black)
+      // height. Leave the content at its XML match_parent height and only keep IME monitoring,
+      // which still drives the toolbar auto-hide.
       monitorImeStatus()
     }
-    frameLayoutParams = mChildOfContent.layoutParams as FrameLayout.LayoutParams
   }
 
   private fun monitorImeStatus() {
@@ -86,32 +86,6 @@ class FullScreenHelper private constructor(
         mKeyBoardListener!!.onKeyboardChange(keyBoardIsShowing, keyboardHeight)
       }
     }
-  }
-
-  private fun possiblyResizeChildOfContent() {
-    val usableHeightNow = computeUsableHeight()
-    val currentHeightLayoutHeight: Int
-
-    if (usableHeightNow != usableHeightPrevious) {
-      val usableHeightSansKeyboard = mChildOfContent.rootView.height
-      val heightDifference = usableHeightSansKeyboard - usableHeightNow
-      if (heightDifference > usableHeightSansKeyboard / 4) {
-        // screenKeyboard probably just became visible
-        currentHeightLayoutHeight = usableHeightSansKeyboard - heightDifference
-      } else {
-        // screenKeyboard probably just became hidden
-        currentHeightLayoutHeight = usableHeightSansKeyboard
-      }
-      frameLayoutParams.height = currentHeightLayoutHeight
-      mChildOfContent.requestLayout()
-      usableHeightPrevious = usableHeightNow
-    }
-  }
-
-  private fun computeUsableHeight(): Int {
-    val r = Rect()
-    mChildOfContent.getWindowVisibleDisplayFrame(r)
-    return r.bottom - r.top
   }
 
   companion object {
