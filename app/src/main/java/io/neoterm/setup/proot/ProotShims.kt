@@ -62,12 +62,33 @@ up=${'$'}(cut -d' ' -f1 /proc/uptime 2>/dev/null || echo 0)
 emit "${'$'}ver" 0.000000
 emit "NeoTerm proot userland: fake root (-0), USERLAND xattr ownership" 0.000100
 emit "Command line: BOOT_IMAGE=proot quiet" 0.000200
-mnt=${'$'}(awk '{print ${'$'}2}' /proc/mounts 2>/dev/null | tr '\n' ' ')
+# A guest-releváns mountokat mutatjuk (a host /proc/mounts több száz Android
+# apex/vendor mountot tartalmazna — zaj).
+mnt=${'$'}(awk '${'$'}2=="/" || ${'$'}2 ~ /^\/(proc|sys|dev|tmp|root|etc|usr|var|home|run)(\/|${'$'})/ {print ${'$'}2}' /proc/mounts 2>/dev/null | tr '\n' ' ')
 [ -n "${'$'}mnt" ] && emit "Mounts: ${'$'}mnt" 0.000300
 emit "NeoTerm runtime (uptime): ${'$'}{up}s" "${'$'}up"
 """
 
   private const val NOOP = "#!/bin/sh\nexit 0\n"
+
+  /**
+   * Login-shellben (root) helyreállítja az auth-adatbázis fájljainak módját.
+   * A -0 fake-root alatt egyes csomag-/`adduser`-műveletek a `/etc/passwd`-t
+   * (és társait) temp-fájl+rename úton írják újra, és a fájl 0600-ra állhat, ami
+   * eltöri a `getpwuid`-ot a privilégium-dropoló démonoknál (pl. PostgreSQL
+   * `initdb`: „could not look up effective user ID"). A guestbeli `chmod` a proot
+   * chmod-handlerén megy át, így a perzisztens (xattr) módot is helyreállítja —
+   * függetlenül attól, hogy meta-érték vagy valódi fájlmód romlott el. SOURCE-olva
+   * fut (profile.d), ezért nincs benne `exit`/`return`.
+   */
+  private const val AUTH_PERMS_FIXUP = """# NeoTerm: az auth-DB fájlok olvashatóságának biztosítása proot fake-root alatt.
+if [ "${'$'}(id -u 2>/dev/null)" = 0 ]; then
+  [ -e /etc/passwd ]  && chmod 644 /etc/passwd  2>/dev/null
+  [ -e /etc/group ]   && chmod 644 /etc/group   2>/dev/null
+  [ -e /etc/shadow ]  && chmod 640 /etc/shadow  2>/dev/null
+  [ -e /etc/gshadow ] && chmod 640 /etc/gshadow 2>/dev/null
+fi
+"""
 
   /** Kiírja/frissíti a shimeket a rootfs `/usr/local/bin`-jébe (idempotens). */
   fun install(rootfs: String) {
@@ -80,6 +101,16 @@ emit "NeoTerm runtime (uptime): ${'$'}{up}s" "${'$'}up"
     write(binDir, "dmesg", DMESG)
     write(binDir, "journalctl", NOOP)
     write(binDir, "loginctl", NOOP)
+
+    // Login-shell fixup: az auth-DB fájlok módja (profile.d → root login-shellben fut).
+    val profileDir = File(rootfs, "etc/profile.d")
+    if (profileDir.isDirectory || profileDir.mkdirs()) {
+      runCatching {
+        val f = File(profileDir, "00-neoterm-auth-perms.sh")
+        f.writeText(AUTH_PERMS_FIXUP)
+        Os.chmod(f.absolutePath, 420 /* 0644 — profile.d scriptet a shell source-olja */)
+      }.onFailure { NLog.e("ProotShims", "Cannot write auth-perms fixup: ${it.message}") }
+    }
   }
 
   private fun write(dir: File, name: String, content: String) {
