@@ -65,6 +65,19 @@ int main(int argc, char** argv) {
         CHECK(rc == 0, "write_meta on non-existent path is non-fatal (rc=%d)", rc);
     }
 
+    /* SSL-key scenario (the exit-time create-meta flush): a key created by root
+     * with mode 0640 must report owner=root + 0640, NOT the loosened real mode
+     * or the caller's euid. PostgreSQL rejects a db-user-owned key with g/o bits. */
+    {
+        char k[PATH_MAX]; strcpy(k, "/tmp"); /* placeholder, real path set below */
+        /* simulate: open(O_CREAT,0640) as root -> EXIT flush writes meta(0640, root) */
+        write_meta_file(meta, 0640, root.euid, root.egid, true, &root);
+        read_meta_file(meta,&mode,&owner,&group,&pg);   /* postgres reads the key */
+        CHECK(owner==0, "ssl key created-as-root: stat-as-postgres sees owner=root");
+        CHECK((mode & 0777)==0640, "ssl key: mode is 0640, not loosened (got %o)", mode & 0777);
+        (void)k;
+    }
+
     printf("\n%s (%d failures)\n", fails? "*** TESTS FAILED ***":"ALL TESTS PASSED", fails);
     return fails?1:0;
 }

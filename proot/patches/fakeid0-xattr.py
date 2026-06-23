@@ -114,6 +114,68 @@ for f in ["open.c","stat.c"]:
     s=s.replace('path_exists(meta_path)','meta_exists(meta_path)')
     wr(p,s)
 
+# ---- config.h: per-tracee deferred create-meta state ----
+ch=FK+"config.h"; s=rd(ch)
+must('meta_pending' not in s, "config.h already patched")
+s=s.replace('#include <sys/types.h>   /* uid_t, gid_t */',
+            '#include <sys/types.h>   /* uid_t, gid_t */\n#include <linux/limits.h> /* PATH_MAX */',1)
+s=s.replace('\tbool keep_caps;\n} Config;',
+            '\tbool keep_caps;\n\n'
+            '\t/* xattr-backed create-meta: handle_open/handle_mk record a new file\'s\n'
+            '\t * intended mode here at syscall ENTER (the file does not exist yet, so the\n'
+            '\t * xattr cannot be set then); handle_sysexit_end writes it once the create\n'
+            '\t * syscall has succeeded and the file exists. */\n'
+            '\tbool meta_pending;\n\tmode_t meta_pending_mode;\n\tchar meta_pending_path[PATH_MAX];\n} Config;',1)
+must('meta_pending_path' in s, "config.h fields"); wr(ch,s)
+
+# ---- open.c: new-file create defers the meta write to EXIT ----
+of=FK+"open.c"; s=rd(of)
+old_o=("\t\tmode = peek_reg(tracee, ORIGINAL, mode_sysarg);\n"
+       "\t\tpoke_reg(tracee, mode_sysarg, (mode|0700));\n"
+       "\t\tstatus = write_meta_file(meta_path, mode, config->euid, config->egid, 1, config);\n"
+       "\t\treturn status;")
+new_o=("\t\tmode = peek_reg(tracee, ORIGINAL, mode_sysarg);\n"
+       "\t\tpoke_reg(tracee, mode_sysarg, (mode|0700));\n"
+       "\t\t/* xattr-backed: the file does not exist yet; defer the meta write to EXIT. */\n"
+       "\t\tconfig->meta_pending = true;\n"
+       "\t\tconfig->meta_pending_mode = mode;\n"
+       "\t\tstrncpy(config->meta_pending_path, meta_path, PATH_MAX - 1);\n"
+       "\t\tconfig->meta_pending_path[PATH_MAX - 1] = 0;\n"
+       "\t\treturn 0;")
+must(old_o in s, "open.c new-file block"); s=s.replace(old_o,new_o,1); wr(of,s)
+
+# ---- mk.c: mkdir/mknod defers the meta write to EXIT ----
+mf=FK+"mk.c"; s=rd(mf)
+old_m=("\tmode = peek_reg(tracee, ORIGINAL, mode_sysarg);\n"
+       "\tpoke_reg(tracee, mode_sysarg, (mode|0700));\n"
+       "\treturn write_meta_file(meta_path, mode, config->euid, config->egid, 1, config);")
+new_m=("\tmode = peek_reg(tracee, ORIGINAL, mode_sysarg);\n"
+       "\tpoke_reg(tracee, mode_sysarg, (mode|0700));\n"
+       "\t/* xattr-backed: defer the meta write to EXIT (dir/node does not exist yet). */\n"
+       "\tconfig->meta_pending = true;\n"
+       "\tconfig->meta_pending_mode = mode;\n"
+       "\tstrncpy(config->meta_pending_path, meta_path, PATH_MAX - 1);\n"
+       "\tconfig->meta_pending_path[PATH_MAX - 1] = 0;\n"
+       "\treturn 0;")
+must(old_m in s, "mk.c write block"); s=s.replace(old_m,new_m,1); wr(mf,s)
+
+# ---- fake_id0.c: flush the deferred create-meta at the top of handle_sysexit_end ----
+xf=FK+"fake_id0.c"; s=rd(xf)
+old_x=("\tsysnum = get_sysnum(tracee, ORIGINAL);\n\n#ifdef USERLAND\n"
+       "\tif ((get_sysnum(tracee, CURRENT) == PR_fstat) || (get_sysnum(tracee, CURRENT) == PR_fstat64)) {")
+new_x=("\tsysnum = get_sysnum(tracee, ORIGINAL);\n\n#ifdef USERLAND\n"
+       "\t/* xattr-backed: flush a deferred create-meta (open/creat/mkdir/mknod recorded it\n"
+       "\t * at ENTER, when the target did not exist). The syscall has now run; persist the\n"
+       "\t * intended mode + creator id only if it succeeded (the file exists). */\n"
+       "\tif (config->meta_pending) {\n"
+       "\t\tconfig->meta_pending = false;\n"
+       "\t\tif ((long) peek_reg(tracee, CURRENT, SYSARG_RESULT) >= 0)\n"
+       "\t\t\twrite_meta_file(config->meta_pending_path, config->meta_pending_mode,\n"
+       "\t\t\t\tconfig->euid, config->egid, 1, config);\n"
+       "\t}\n"
+       "\tif ((get_sysnum(tracee, CURRENT) == PR_fstat) || (get_sysnum(tracee, CURRENT) == PR_fstat64)) {")
+must(old_x in s, "fake_id0.c sysexit head"); s=s.replace(old_x,new_x,1); wr(xf,s)
+
 # ---- rename.c: the xattr travels with the inode on rename(2); drop the meta
 #      "copy", whose unlink(meta_path) now == unlink(the real file) -> ENOENT ----
 rf=FK+"rename.c"; s=rd(rf)
