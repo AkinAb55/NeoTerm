@@ -80,6 +80,12 @@
 
   <CheckBoxPreference
     android:defaultValue="false"
+    android:key="@string/key_general_sensors"
+    android:summary="@string/pref_general_sensors_desc"
+    android:title="@string/pref_general_sensors"/>
+
+  <CheckBoxPreference
+    android:defaultValue="false"
     android:key="@string/key_general_enable_word_based_ime"
     android:summary="@string/pref_general_enable_word_based_ime_desc"
     android:title="@string/pref_general_enable_word_based_ime"/>

@@ -87,6 +87,9 @@ class NeoTermService : Service() {
       // GPS: when enabled (+ location granted), run a built-in gpsd on
       // 127.0.0.1:2947 serving the device GPS to the distro.
       io.neoterm.utils.GpsBridge.start(this)
+      // Sensors + battery: expose them to the distro as a fake /sys
+      // (power_supply + IIO devices), so upower/acpi/iio_info work with no root.
+      io.neoterm.utils.SensorBridge.start(this)
       // USB host: detect plug-in/out and request permission via a
       // BroadcastReceiver (no manifest device_filter), serving granted devices.
       io.neoterm.utils.UsbBridge.register(this)
@@ -145,6 +148,7 @@ class NeoTermService : Service() {
     io.neoterm.utils.PulseAudioBridge.stop()
     io.neoterm.utils.CameraBridge.stop()
     io.neoterm.utils.GpsBridge.stop()
+    io.neoterm.utils.SensorBridge.stop()
     io.neoterm.utils.UsbBridge.unregister(this)
     io.neoterm.setup.usbserial.UsbSerialBridge.stopAll()
 

@@ -343,6 +343,16 @@ object NeoPreference {
     )
   }
 
+  /** When on, the device battery and motion/environment sensors are exposed to
+   *  the distro as a fake /sys/class/power_supply and /sys/bus/iio/devices tree,
+   *  so upower/acpi/iio_info and IIO-aware tools work. Runtime toggle. */
+  fun isSensorsEnabled(): Boolean {
+    return loadBoolean(
+      R.string.key_general_sensors,
+      DefaultValues.enableSensors
+    )
+  }
+
   /** The user's default cursor shape: 0 = block, 1 = underline, 2 = bar (TerminalEmulator
    *  CURSOR_STYLE_*). Apps can still override it at runtime via DECSCUSR. */
   fun getCursorStyle(): Int {
