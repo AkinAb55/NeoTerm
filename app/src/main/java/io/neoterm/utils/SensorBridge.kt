@@ -69,6 +69,13 @@ object SensorBridge {
   // (EACCES) — shadowing the whole subtree keeps libiio from escaping the bind.
   private val iioDir = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-bus-iio")
   private val iioDevDir = File(iioDir, "devices")
+  // libiio's local_create_context() ALSO scans /sys/class/hwmon and
+  // /sys/kernel/debug/iio; on Android those resolve to the real /sys (hwmon is
+  // SELinux-denied, /sys/kernel/debug is 0700 debugfs) and any scan error aborts
+  // the whole context with EACCES. Shadow them with empty dirs so the scans
+  // succeed (find nothing) instead of hitting the denied paths.
+  private val hwmonDir = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-class-hwmon")
+  private val debugIioDir = File("${NeoTermPath.PROOT_ROOT_PATH}/sys-kernel-debug-iio")
   private val batDir = File(psDir, "BAT0")
   private val acDir = File(psDir, "AC0")
   private val usbDir = File(psDir, "USB")
@@ -127,6 +134,9 @@ object SensorBridge {
     if (psDir.isDirectory || psDir.mkdirs()) out.add(psDir.absolutePath to "/sys/class/power_supply")
     iioDevDir.mkdirs()
     if (iioDir.isDirectory || iioDir.mkdirs()) out.add(iioDir.absolutePath to "/sys/bus/iio")
+    // Empty shadows so libiio's hwmon / debugfs scans succeed instead of EACCES.
+    if (hwmonDir.isDirectory || hwmonDir.mkdirs()) out.add(hwmonDir.absolutePath to "/sys/class/hwmon")
+    if (debugIioDir.isDirectory || debugIioDir.mkdirs()) out.add(debugIioDir.absolutePath to "/sys/kernel/debug/iio")
     return out
   }
 
