@@ -378,6 +378,10 @@ object SensorBridge {
       ?.takeIf { it != Int.MIN_VALUE && it != 0 }
     val chargeCounter = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
       ?.takeIf { it != Int.MIN_VALUE && it != 0 }
+    // acpi/upower compute the % and rate from charge_now / charge_full, NOT from
+    // `capacity`. Android only gives the *current* charge (CHARGE_COUNTER, µAh) and
+    // the %; derive a consistent full-charge so charge_now/charge_full == capacity.
+    val chargeFull = if (chargeCounter != null && pct > 0) chargeCounter.toLong() * 100 / pct else null
 
     write(batDir, "type", "Battery\n")
     write(batDir, "present", if (present) "1\n" else "0\n")
@@ -391,8 +395,16 @@ object SensorBridge {
     if (voltageMv >= 0) write(batDir, "voltage_now", "${voltageMv * 1000L}\n")   // µV
     if (tempTenths != Int.MIN_VALUE) write(batDir, "temp", "$tempTenths\n")       // tenths °C
     curNow?.let { write(batDir, "current_now", "$it\n") }                          // µA
-    chargeCounter?.let { write(batDir, "charge_counter", "$it\n") }               // µAh
-    write(batDir, "uevent", buildUevent(statusStr, present, tech, pct, capStr, healthStr, voltageMv, tempTenths, curNow))
+    chargeCounter?.let {
+      write(batDir, "charge_counter", "$it\n")                                     // µAh
+      write(batDir, "charge_now", "$it\n")                                         // µAh (= remaining)
+    }
+    chargeFull?.let {
+      write(batDir, "charge_full", "$it\n")                                        // µAh
+      write(batDir, "charge_full_design", "$it\n")
+    }
+    write(batDir, "uevent", buildUevent(statusStr, present, tech, pct, capStr, healthStr,
+      voltageMv, tempTenths, curNow, chargeCounter, chargeFull))
 
     val acOnline = plugged and (BatteryManager.BATTERY_PLUGGED_AC or BatteryManager.BATTERY_PLUGGED_WIRELESS) != 0
     val usbOnline = plugged and BatteryManager.BATTERY_PLUGGED_USB != 0
@@ -402,7 +414,7 @@ object SensorBridge {
 
   private fun buildUevent(
     status: String, present: Boolean, tech: String, pct: Int, capLevel: String,
-    health: String, voltageMv: Int, tempTenths: Int, curNow: Int?
+    health: String, voltageMv: Int, tempTenths: Int, curNow: Int?, chargeNow: Int?, chargeFull: Long?
   ): String = buildString {
     append("POWER_SUPPLY_NAME=BAT0\n")
     append("POWER_SUPPLY_TYPE=Battery\n")
@@ -414,6 +426,8 @@ object SensorBridge {
     if (voltageMv >= 0) append("POWER_SUPPLY_VOLTAGE_NOW=${voltageMv * 1000L}\n")
     if (tempTenths != Int.MIN_VALUE) append("POWER_SUPPLY_TEMP=$tempTenths\n")
     curNow?.let { append("POWER_SUPPLY_CURRENT_NOW=$it\n") }
+    chargeNow?.let { append("POWER_SUPPLY_CHARGE_NOW=$it\n") }
+    chargeFull?.let { append("POWER_SUPPLY_CHARGE_FULL=$it\n"); append("POWER_SUPPLY_CHARGE_FULL_DESIGN=$it\n") }
   }
 
   private fun statusStr(s: Int): String = when (s) {
