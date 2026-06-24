@@ -347,17 +347,24 @@ object UsbSerialBridge {
       val product = runCatching { device.productName }.getOrNull()?.takeIf { it.isNotBlank() } ?: "USB Serial"
       val manuf = runCatching { device.manufacturerName }.getOrNull() ?: ""
       val serial = runCatching { device.serialNumber }.getOrNull() ?: ""
+      val numIf = device.interfaceCount.coerceAtLeast(1)
       File(dir, "dev").writeText("188:${slot.index}\n")
       File(dir, "uevent").writeText("MAJOR=188\nMINOR=${slot.index}\nDEVNAME=${slot.ttyName}\n")
-      // Write the identifying attributes at both levels — pyserial reads them from
-      // slightly different places depending on its version.
+      // Write the USB-device attributes at both levels — pyserial computes
+      // usb_device_path = dirname(.../device) = the ttyUSB0 dir (subsystem=usb),
+      // and reads idVendor/idProduct/bNumInterfaces/... from there; older versions
+      // read from .../device. bNumInterfaces is parsed with int() -> must exist.
       for (base in arrayOf(dir, dev)) {
         File(base, "idVendor").writeText("$vid\n")
         File(base, "idProduct").writeText("$pid\n")
         File(base, "product").writeText("$product\n")
         File(base, "manufacturer").writeText("$manuf\n")
         File(base, "serial").writeText("$serial\n")
+        File(base, "bNumInterfaces").writeText(" $numIf\n")   // sysfs has a leading space
+        File(base, "bcdDevice").writeText("0100\n")
       }
+      File(dev, "interface").writeText("$product\n")
+      File(dev, "bInterfaceNumber").writeText("00\n")
       File(dev, "uevent").writeText("DEVTYPE=usb_interface\nPRODUCT=$vid/$pid\n")
       // subsystem symlink whose basename is "usb" -> pyserial treats it as a USB port.
       runCatching { Os.symlink("/sys/bus/usb", File(dev, "subsystem").absolutePath) }
