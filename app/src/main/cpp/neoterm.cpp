@@ -258,6 +258,7 @@ Java_io_neoterm_backend_JNI_openPty(JNIEnv *env, jclass TERMUX_UNUSED(clazz),
 
 static int baud_to_int(speed_t s) {
     switch (s) {
+        case B0: return 0;            /* POSIX hangup (drop DTR), not a real rate */
         case B50: return 50;          case B75: return 75;
         case B110: return 110;        case B134: return 134;
         case B150: return 150;        case B200: return 200;

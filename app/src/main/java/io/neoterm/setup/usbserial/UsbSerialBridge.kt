@@ -66,6 +66,7 @@ object UsbSerialBridge {
     var lastParams: IntArray? = null
     var dtr = false
     var rts = false
+    var hungUp = false
     var lastModemLogMs = 0L
   }
 
@@ -157,7 +158,7 @@ object UsbSerialBridge {
     slot.deviceName = device.deviceName
     slot.port = port
     slot.conn = conn
-    slot.dtr = false; slot.rts = false; slot.lastParams = null; slot.running = true
+    slot.dtr = false; slot.rts = false; slot.hungUp = false; slot.lastParams = null; slot.running = true
     clearStaleLocks(slot.ttyName)   // a previous holder may have left a live-PID lock
     startPump(slot, slot.pfd!!)
     writeSysfs(slot, device)
@@ -199,6 +200,7 @@ object UsbSerialBridge {
     slot.lastParams = null
     slot.dtr = false
     slot.rts = false
+    slot.hungUp = false
     clearStaleLocks(slot.ttyName)   // the dead PTY's lock must not block the next open
     Kmsg.log("usb-serial: $msg")
   }
@@ -363,6 +365,24 @@ object UsbSerialBridge {
   private fun applyParamsIfChanged(slot: Slot, masterFd: Int) = synchronized(slot) {
     val port = slot.port ?: return
     val p = runCatching { Pty.serialParams(masterFd) }.getOrNull() ?: return
+    // B0 (baud 0) is the POSIX hangup: drop DTR rather than reprogram the chip
+    // baud. minicom/cu use it on open and close; many builds pulse B0 -> real
+    // speed on connect, which now resets an ESP32 (DTR low->high) so its boot log
+    // appears without a manual hangup toggle. esptool never uses B0, so its
+    // ioctl-driven DTR/RTS auto-reset is unaffected.
+    if (p[0] == 0) {
+      if (!slot.hungUp) {
+        slot.hungUp = true
+        setLines(slot, dtr = false, rts = slot.rts)
+        Kmsg.log("usb-serial: ${slot.ttyName} hangup (B0) -> DTR=0")
+      }
+      return
+    }
+    if (slot.hungUp) {
+      slot.hungUp = false
+      setLines(slot, dtr = true, rts = slot.rts)   // resume from hangup re-asserts DTR
+      Kmsg.log("usb-serial: ${slot.ttyName} resume -> DTR=1")
+    }
     if (p.contentEquals(slot.lastParams)) return
     slot.lastParams = p
     val parity = when (p[3]) {
