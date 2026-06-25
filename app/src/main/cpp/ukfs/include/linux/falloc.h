@@ -1,0 +1,14 @@
+/* uKernel hamis <linux/falloc.h> — fallocate flagek. */
+#ifndef _UK_LINUX_FALLOC_H
+#define _UK_LINUX_FALLOC_H
+#define FALLOC_FL_KEEP_SIZE	0x01
+#define FALLOC_FL_PUNCH_HOLE	0x02
+#define FALLOC_FL_NO_HIDE_STALE	0x04
+#define FALLOC_FL_COLLAPSE_RANGE 0x08
+#define FALLOC_FL_ZERO_RANGE	0x10
+#define FALLOC_FL_INSERT_RANGE	0x20
+#define FALLOC_FL_UNSHARE_RANGE	0x40
+#define FALLOC_FL_ALLOCATE_RANGE 0x00
+#define FALLOC_FL_WRITE_ZEROES 0x80
+#define FALLOC_FL_MODE_MASK 0xFF
+#endif
