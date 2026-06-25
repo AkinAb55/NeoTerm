@@ -346,14 +346,21 @@ static size_t ukfs_emit_dents(struct ukfs_vfd *v, unsigned char *out, size_t cap
  * open proceeds and the fd is captured in uknl_fs_open_exit. */
 /* --- TEMP DEBUG (remove after diagnosis): append a line to the app's kmsg
  * buffer (the host file bound at the guest /dev/kmsg), so it shows up in
- * `dmesg`. proot's own stderr isn't visible in the guest terminal. --- */
+ * `dmesg`. The host path is resolved once (from whichever tracee calls first)
+ * and cached, so it also works for child tracees (e.g. the `mount` process)
+ * whose binding lookup may differ. --- */
+static char g_uk_kmsg[PATH_MAX];
+static int  g_uk_kmsg_done;
 static void uk_dbg(Tracee *tracee, const char *line)
 {
-	char kp[PATH_MAX];
-	strcpy(kp, "/dev/kmsg");
-	Binding *b = get_binding(tracee, GUEST, kp);
-	if (!b) return;
-	int fd = open(b->host.path, O_WRONLY | O_APPEND | O_CLOEXEC);
+	if (!g_uk_kmsg_done) {
+		g_uk_kmsg_done = 1;
+		char kp[PATH_MAX]; strcpy(kp, "/dev/kmsg");
+		Binding *b = get_binding(tracee, GUEST, kp);
+		if (b) strncpy(g_uk_kmsg, b->host.path, sizeof g_uk_kmsg - 1);
+	}
+	if (!g_uk_kmsg[0]) return;
+	int fd = open(g_uk_kmsg, O_WRONLY | O_APPEND | O_CLOEXEC);
 	if (fd >= 0) { (void) write(fd, line, strlen(line)); close(fd); }
 }
 
