@@ -101,9 +101,14 @@ static const char *np(const char *p) { while (*p == '/') p++; return p; }
 /* devtoken -> block device path */
 static void dev_path(const char *token, char *out, size_t cap)
 {
-	if (token[0] == '/') { snprintf(out, cap, "%s", token); return; }
-	const char *base = getenv("UKFSD_DEVDIR");
-	snprintf(out, cap, "%s%s", base ? base : "/dev/", token);
+	/* absolute path or explicit "@socket": pass through. */
+	if (token[0] == '/' || token[0] == '@') { snprintf(out, cap, "%s", token); return; }
+	/* UKFSD_DEVDIR set: file-image backend (used by the host test harness). */
+	const char *dir = getenv("UKFSD_DEVDIR");
+	if (dir) { snprintf(out, cap, "%s%s", dir, token); return; }
+	/* default (Android): the USB block device is served over io.neoterm.block. */
+	const char *sock = getenv("UKFSD_BLOCKSOCK");
+	snprintf(out, cap, "@%s", sock ? sock : "io.neoterm.block");
 }
 
 /* ---- LIST blob: count × {u8 type, u64 ino, u64 size, u16 namelen, name[]} LE ---- */
@@ -230,6 +235,15 @@ static int handle(int fd, char *line)
 
 	if (sscanf(line, "MOUNT %63s %511s", fstype, token) == 2) {
 		char path[600]; dev_path(token, path, sizeof path);
+		if (strcmp(fstype, "auto") == 0) {
+			/* probe the engine's filesystems in turn (matches libukfs_all's
+			 * lazy mount). uk_mount rejects an unregistered name before it
+			 * touches the device, so a miss is cheap. */
+			static const char *cands[] = { "vfat", "exfat", "ntfs3", "ext4", NULL };
+			for (int i = 0; cands[i]; i++)
+				if (ukfs_mount(cands[i], path) == 0) return reply_ok(fd);
+			return reply_err(fd, ENODEV);
+		}
 		return ukfs_mount(fstype, path) == 0 ? reply_ok(fd) : reply_err(fd, ENODEV);
 	}
 	if (!strcmp(line, "UMOUNT"))  return reply_ok(fd);

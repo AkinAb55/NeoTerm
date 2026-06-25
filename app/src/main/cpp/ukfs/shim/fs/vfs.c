@@ -50,7 +50,24 @@ struct user_namespace init_user_ns;
 /* ===== blokk-backend ===== */
 static struct dentry *g_api_root;  /* fwd: a uk_mount és az API is állítja */
 static int   g_bdev_fd = -1;       /* image-backend fd */
+static int   g_bdev_sock = -1;     /* 0 = block-over-socket active, -1 = not */
 static unsigned g_blocksize = 512;
+
+/* ===== block-over-socket backend (io.neoterm.block) =====
+ * On Android there is no real /dev/uksd0: the USB block device is served by the
+ * BlockBridge over the abstract socket io.neoterm.block. When uk_mount is given
+ * a "@<name>" devpath, sector I/O is proxied over that socket instead of
+ * pread/pwrite on a local fd. The client lives in block_sock.c (separate TU, no
+ * fake kernel headers — its libc <sys/socket.h> would otherwise clash with the
+ * fake <linux/fs.h> __kernel_fsid_t on glibc). */
+extern int       bsock_open(const char *name);
+extern void      bsock_close(void);
+extern ssize_t   bsock_pread(void *buf, size_t len, off_t off);
+extern ssize_t   bsock_pwrite(const void *buf, size_t len, off_t off);
+extern long long bsock_size(void);
+extern void      bsock_flush(void);
+/* the block backend (fd image or socket) is open */
+static int bdev_active(void) { return g_bdev_fd >= 0 || g_bdev_sock >= 0; }
 
 /* UK_BDEV_DELAY_US: mesterséges latencia per bdev-I/O (a valós USB-pendrive lassúságának
  * szimulálása image-en — a journal-commit-szál vs fő flush-szál race reprodukálásához gdb-vel). */
@@ -62,9 +79,9 @@ static int g_bdev_iocount = 0;
 static int uk_bdev_should_fail(void){ int n=uk_bdev_fail_every(); if(n<=0)return 0; return (++g_bdev_iocount % n)==0; }
 /* egyetlen nyers I/O-próba (a hiba-injektálással) */
 static ssize_t bdev_pread1(void *buf, size_t len, off_t off)
-{ long d=uk_bdev_delay(); if(d>0) usleep(d); if(uk_bdev_should_fail()){errno=EIO;return -1;} return pread(g_bdev_fd, buf, len, off); }
+{ long d=uk_bdev_delay(); if(d>0) usleep(d); if(uk_bdev_should_fail()){errno=EIO;return -1;} if(g_bdev_sock>=0) return bsock_pread(buf,len,off); return pread(g_bdev_fd, buf, len, off); }
 static ssize_t bdev_pwrite1(const void *buf, size_t len, off_t off)
-{ long d=uk_bdev_delay(); if(d>0) usleep(d); if(uk_bdev_should_fail()){errno=EIO;return -1;} return pwrite(g_bdev_fd, buf, len, off); }
+{ long d=uk_bdev_delay(); if(d>0) usleep(d); if(uk_bdev_should_fail()){errno=EIO;return -1;} if(g_bdev_sock>=0) return bsock_pwrite(buf,len,off); return pwrite(g_bdev_fd, buf, len, off); }
 /* ÚJRAPRÓBÁLÓ bdev-I/O: a valós USB-pendrive ÁTMENETI hibáit (amit a block.so néha felszínre hoz)
  * elnyeli a FS-logika ELŐTT — különben az ext4/jbd2 hibakezelő-útja SIGTRAP/segfaultot ad. 8 próba
  * kis backoffal; csak a TARTÓS hiba jut át (EIO), amit a FS gracefully kezel (cp EIO, nem crash). */
@@ -195,7 +212,7 @@ void sb_breadahead(struct super_block *sb, sector_t block) { (void)sb; (void)blo
 
 static void bh_writeback(struct buffer_head *bh)
 {
-	if (g_bdev_fd >= 0 && (bh->b_state & (1UL << BH_Dirty)))
+	if (bdev_active() && (bh->b_state & (1UL << BH_Dirty)))
 		bdev_pwrite(bh->b_data, bh->b_size, (off_t)bh->b_blocknr * bh->b_size);
 	bh->b_state &= ~(1UL << BH_Dirty);
 }
@@ -230,10 +247,10 @@ int submit_bh(blk_opf_t opf, struct buffer_head *bh)
 	off_t off = (off_t)bh->b_blocknr * bh->b_size;
 	int ok = 1;
 	if (op == 1 /*REQ_OP_WRITE*/) {
-		if (g_bdev_fd >= 0 && bdev_pwrite(bh->b_data, bh->b_size, off) != (ssize_t)bh->b_size) ok = 0;
+		if (bdev_active() && bdev_pwrite(bh->b_data, bh->b_size, off) != (ssize_t)bh->b_size) ok = 0;
 		else bh->b_state &= ~(1UL << BH_Dirty);
 	} else {                               /* REQ_OP_READ */
-		if (g_bdev_fd >= 0 && bdev_pread(bh->b_data, bh->b_size, off) == (ssize_t)bh->b_size)
+		if (bdev_active() && bdev_pread(bh->b_data, bh->b_size, off) == (ssize_t)bh->b_size)
 			bh->b_state |= (1UL << BH_Uptodate);
 		else ok = 0;
 	}
@@ -481,8 +498,13 @@ struct dentry *uk_mount(const char *fstype, const char *devpath)
 	for (fs = g_fs_list; fs; fs = fs->next) if (!strcmp(fs->name, fstype)) break;
 	if (!fs) { fprintf(stderr, "[ukfs] ismeretlen fs: %s\n", fstype); return NULL; }
 
-	g_bdev_fd = open(devpath, O_RDWR);
-	if (g_bdev_fd < 0) { const char *ll=getenv("UK_LOGLEVEL"); if(!ll||atoi(ll)>=6) fprintf(stderr, "[ukfs] eszköz nem nyitható: %s\n", devpath); return NULL; }
+	if (devpath[0] == '@') {            /* block-over-socket: "@io.neoterm.block" */
+		if (bsock_open(devpath + 1) != 0) { fprintf(stderr, "[ukfs] block-socket nem elérhető: %s\n", devpath + 1); return NULL; }
+		g_bdev_sock = 0;
+	} else {
+		g_bdev_fd = open(devpath, O_RDWR);
+		if (g_bdev_fd < 0) { const char *ll=getenv("UK_LOGLEVEL"); if(!ll||atoi(ll)>=6) fprintf(stderr, "[ukfs] eszköz nem nyitható: %s\n", devpath); return NULL; }
+	}
 
 	static struct block_device bdev;
 	static struct super_block sb;
@@ -836,7 +858,7 @@ int block_write_end(loff_t pos, unsigned len, unsigned copied, struct folio *fol
 	struct inode *inode = folio->mapping ? folio->mapping->host : 0;
 	struct buffer_head *head = folio->uk_bh, *bh = head;
 	if (bh) do {
-		if (bh->b_blocknr && (bh->b_state & (1UL << BH_Mapped)) && g_bdev_fd >= 0)
+		if (bh->b_blocknr && (bh->b_state & (1UL << BH_Mapped)) && bdev_active())
 			bdev_pwrite(bh->b_data, bh->b_size, (off_t)bh->b_blocknr * bh->b_size);
 		bh = bh->b_this_page;
 	} while (bh && bh != head);
@@ -901,6 +923,7 @@ int ukfs_remount(const char *fstype, const char *img)
 	g_fcache = NULL;                       /* stale page-cache eldobása */
 	g_blocksize = 512;
 	if (g_bdev_fd >= 0) { close(g_bdev_fd); g_bdev_fd = -1; }
+	if (g_bdev_sock >= 0) { bsock_close(); g_bdev_sock = -1; }
 	g_api_root = uk_mount(fstype, img);    /* friss fill_super → friss sb/sbi/root */
 	return (g_api_root && g_api_root->d_inode) ? 0 : -1;
 }
@@ -1940,7 +1963,7 @@ struct buffer_head *sb_bread_unmovable(struct super_block *sb, sector_t block) {
 
 /* bdev_nr_bytes: a backend (image/eszköz) tényleges mérete — az ntfs3 ebből számol blocks-ot */
 #include <sys/stat.h>
-u64 bdev_nr_bytes(struct block_device *bdev) { (void)bdev; struct stat st; if (g_bdev_fd >= 0 && fstat(g_bdev_fd, &st) == 0) { if (st.st_size) return st.st_size; off_t e = lseek(g_bdev_fd, 0, SEEK_END); return e > 0 ? (u64)e : 0; } return 0; }
+u64 bdev_nr_bytes(struct block_device *bdev) { (void)bdev; if (g_bdev_sock >= 0) { long long sz = bsock_size(); return sz > 0 ? (u64)sz : 0; } struct stat st; if (g_bdev_fd >= 0 && fstat(g_bdev_fd, &st) == 0) { if (st.st_size) return st.st_size; off_t e = lseek(g_bdev_fd, 0, SEEK_END); return e > 0 ? (u64)e : 0; } return 0; }
 
 /* inode_state_read_once: az ntfs3 az I_NEW-t ebből olvassa (iget5_locked állítja) */
 unsigned long inode_state_read_once(struct inode *inode) { return inode ? inode->i_state : 0; }

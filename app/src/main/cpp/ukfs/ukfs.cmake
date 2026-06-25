@@ -52,6 +52,7 @@ endforeach()
 #     compiled once and linked into both the test harness and the ukfsd server. ---
 add_library(ukfs_engine OBJECT
   ${UKFS_DIR}/shim/fs/vfs.c
+  ${UKFS_DIR}/shim/fs/block_sock.c   # block-over-socket backend (io.neoterm.block)
   ${UKFS_DIR}/shim/fs/posix_acl.c
   ${UKFS_DIR}/shim/compat_bionic.c   # backtrace/hex/system_wq/get_random_u32 shims
   ${UKFS_OBJ_SRCS}
