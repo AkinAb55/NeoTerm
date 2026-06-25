@@ -354,8 +354,8 @@ object NeoPreference {
   }
 
   /** When on, a connected USB pendrive is exposed to the distro as a raw block
-   *  device /dev/uksd0 (SCSI Bulk-Only-Transport app-side), so dd/fdisk/parted/
-   *  mkfs.*/fsck.* and any filesystem work with no root. Runtime toggle. */
+   *  device /dev/uksd0 (SCSI Bulk-Only-Transport app-side), so dd, fdisk, parted,
+   *  mkfs and fsck and any filesystem work with no root. Runtime toggle. */
   fun isUsbStorageEnabled(): Boolean {
     return loadBoolean(
       R.string.key_general_usb_storage,
