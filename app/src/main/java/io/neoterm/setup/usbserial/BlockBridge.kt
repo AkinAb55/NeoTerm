@@ -9,9 +9,12 @@ import android.hardware.usb.UsbManager
 import android.net.LocalServerSocket
 import android.net.LocalSocket
 import io.neoterm.component.config.NeoPreference
+import io.neoterm.component.config.NeoTermPath
 import io.neoterm.setup.proot.Kmsg
 import io.neoterm.utils.NLog
+import java.io.File
 import java.io.InputStream
+import java.io.RandomAccessFile
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -51,6 +54,7 @@ object BlockBridge {
   @Volatile private var totalBytes = 0L
   private var tag = 1
 
+  private val marker = File("${NeoTermPath.PROOT_ROOT_PATH}/sysdata/uksd0")
   private var server: LocalServerSocket? = null
   @Volatile private var started = false
   private val io = Any()   // serialises SCSI transactions (single in-flight BOT)
@@ -121,6 +125,9 @@ object BlockBridge {
     val cap = runCatching { readCapacity() }.getOrNull()
     if (cap == null) { teardown("$id: READ CAPACITY failed"); return }
     sectorSize = cap.second; totalBytes = (cap.first + 1L) * cap.second
+    // Size the bound /dev/uksd0 marker (sparse) so the guest's native fstat/SEEK_END
+    // report the real capacity (the proxy overrides actual read/write/lseek/ioctl).
+    runCatching { marker.parentFile?.mkdirs(); RandomAccessFile(marker, "rw").use { it.setLength(totalBytes) } }
     val gb = totalBytes / (1024.0 * 1024 * 1024)
     Kmsg.log("usb-block: /dev/uksd0 <- $id  %.1f GB  (sector %d, %d sectors)".format(gb, sectorSize, cap.first + 1))
     NLog.e(TAG, "attached $id ${totalBytes}B sector=$sectorSize")
@@ -141,6 +148,7 @@ object BlockBridge {
     iface?.let { i -> runCatching { conn?.releaseInterface(i) } }
     runCatching { conn?.close() }
     conn = null; iface = null; epIn = null; epOut = null; deviceName = null; totalBytes = 0
+    runCatching { RandomAccessFile(marker, "rw").use { it.setLength(0) } }   // shrink the marker back
     Kmsg.log("usb-block: $msg")
   }
 
@@ -219,8 +227,10 @@ object BlockBridge {
     0, (count ushr 8).toByte(), count.toByte(), 0)
 
   // ── byte-granular access (sector read-modify-write) ───────────────────────
-  private fun readAt(off: Long, len: Int): ByteArray? {
-    if (off < 0 || len <= 0 || off + len > totalBytes) return null
+  private fun readAt(off: Long, reqLen: Int): ByteArray? {
+    if (off < 0 || reqLen <= 0) return null
+    if (off >= totalBytes) return ByteArray(0)            // EOF
+    val len = minOf(reqLen.toLong(), totalBytes - off).toInt()   // clamp to device end
     val first = off / sectorSize
     val last = (off + len - 1) / sectorSize
     val out = ByteArray(len); var done = 0

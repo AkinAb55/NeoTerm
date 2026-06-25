@@ -213,6 +213,15 @@ object ProotManager {
     }
     bind(args, kmsgBuf.absolutePath, "/dev/kmsg")
 
+    // USB storage: an empty marker file bound onto /dev/uksd0 makes it an openable,
+    // seekable, ls-able node; the proot block proxy (enter.c, UK_BLOCK) overrides its
+    // I/O with SCSI to the app-side BlockBridge. Only when the toggle is on.
+    if (NeoPreference.isUsbStorageEnabled()) {
+      val uksd = File("${NeoTermPath.PROOT_ROOT_PATH}/sysdata").apply { mkdirs() }.let { File(it, "uksd0") }
+      if (!uksd.exists()) runCatching { uksd.writeText("") }
+      bind(args, uksd.absolutePath, "/dev/uksd0")
+    }
+
     // USB-serial: /dev/ttyUSB* are VIRTUAL hotplug ports, not static binds — the
     // proot open-redirect (enter.c) maps them to the live PTY at open time. Just
     // make sure the app-side control/redirect server is up before the guest opens
@@ -360,13 +369,17 @@ object ProotManager {
    * írható könyvtárra állítunk.
    */
   private fun buildHostEnv(): Array<String> {
-    return listOf(
+    val env = mutableListOf(
       "PROOT_TMP_DIR=${NeoTermPath.PROOT_TMP_PATH}",
       "HOME=${NeoTermPath.HOME_PATH}",
       "TERM=xterm-256color",
       "PATH=/system/bin:/system/xbin",
       "ANDROID_ROOT=" + (System.getenv("ANDROID_ROOT") ?: "/system"),
       "ANDROID_DATA=" + (System.getenv("ANDROID_DATA") ?: "/data")
-    ).toTypedArray()
+    )
+    // Only with the storage toggle on: proot then traps read/write/lseek/… for the
+    // /dev/uksd0 block proxy (otherwise those syscalls aren't filtered at all).
+    if (NeoPreference.isUsbStorageEnabled()) env.add("UK_BLOCK=1")
+    return env.toTypedArray()
   }
 }
