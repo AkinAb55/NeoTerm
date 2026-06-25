@@ -290,6 +290,7 @@ static void serve(int cfd)
 	char line[8192];
 	for (;;) {
 		int r = read_line(cfd, line, sizeof line);
+		fprintf(stderr, "ukfsd: read_line -> r=%d line='%s'\n", r, r > 0 ? line : ""); fflush(stderr);
 		if (r == -1) return;                    /* client closed */
 		if (r == -2) { reply(cfd, "ERR 36\n"); continue; }  /* ENAMETOOLONG */
 		if (handle(cfd, line) < 0) return;      /* broken frame -> drop */
@@ -327,7 +328,9 @@ int main(int argc, char **argv)
 	for (;;) {
 		int cfd = accept(sfd, NULL, NULL);
 		if (cfd < 0) { if (errno == EINTR) continue; perror("accept"); break; }
+		fprintf(stderr, "ukfsd: accepted connection fd=%d\n", cfd); fflush(stderr);
 		serve(cfd);
+		fprintf(stderr, "ukfsd: connection closed (fd=%d)\n", cfd); fflush(stderr);
 		close(cfd);
 		/* one FS per connection: drop it so the next client mounts fresh */
 	}
