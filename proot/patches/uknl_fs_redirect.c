@@ -23,6 +23,9 @@ static int uk_fs_on(void)
 	return g_uk_fs;
 }
 
+/* TEMP debug: append a line to the app kmsg buffer (defined later, near uk_dbg). */
+static void uk_dbg_line(const char *line);
+
 /* ---- persistent io.neoterm.fs connection (ukfsd holds one mount per conn) ---- */
 static int  g_ukfs_sock = -1;
 static char g_vmount[PATH_MAX];      /* guest mount point, e.g. "/mnt/usb" */
@@ -69,10 +72,12 @@ static int ukfs_rel(const char *guest, char *out, size_t osz)
 /* Tell ukfsd to MOUNT the block device and remember the guest mount point. */
 static int ukfs_mount_dev(const char *target)
 {
-	int s = ukfs_conn(); if (s < 0) return -1;
-	if (uksd_wn(s, "MOUNT auto uksd0\n", 16) < 0) { ukfs_sdrop(); return -1; }
+	int s = ukfs_conn();
+	if (s < 0) { uk_dbg_line("uk_fs: ukfs_conn FAILED (cannot reach io.neoterm.fs)\n"); return -1; }
+	if (uksd_wn(s, "MOUNT auto uksd0\n", 16) < 0) { uk_dbg_line("uk_fs: MOUNT write failed\n"); ukfs_sdrop(); return -1; }
 	char line[64];
-	if (uksd_rl(s, line, sizeof line) < 0) { ukfs_sdrop(); return -1; }
+	if (uksd_rl(s, line, sizeof line) < 0) { uk_dbg_line("uk_fs: MOUNT no reply\n"); ukfs_sdrop(); return -1; }
+	{ char l[128]; snprintf(l, sizeof l, "uk_fs: ukfsd MOUNT reply='%s'\n", line); uk_dbg_line(l); }
 	if (line[0] != 'O' || line[1] != 'K') return -1;
 	snprintf(g_vmount, sizeof g_vmount, "%s", target);
 	g_vmounted = 1;
@@ -351,6 +356,12 @@ static size_t ukfs_emit_dents(struct ukfs_vfd *v, unsigned char *out, size_t cap
  * whose binding lookup may differ. --- */
 static char g_uk_kmsg[PATH_MAX];
 static int  g_uk_kmsg_done;
+static void uk_dbg_line(const char *line)
+{
+	if (!g_uk_kmsg[0]) return;
+	int fd = open(g_uk_kmsg, O_WRONLY | O_APPEND | O_CLOEXEC);
+	if (fd >= 0) { (void) write(fd, line, strlen(line)); close(fd); }
+}
 static void uk_dbg(Tracee *tracee, const char *line)
 {
 	if (!g_uk_kmsg_done) {
@@ -359,9 +370,7 @@ static void uk_dbg(Tracee *tracee, const char *line)
 		Binding *b = get_binding(tracee, GUEST, kp);
 		if (b) strncpy(g_uk_kmsg, b->host.path, sizeof g_uk_kmsg - 1);
 	}
-	if (!g_uk_kmsg[0]) return;
-	int fd = open(g_uk_kmsg, O_WRONLY | O_APPEND | O_CLOEXEC);
-	if (fd >= 0) { (void) write(fd, line, strlen(line)); close(fd); }
+	uk_dbg_line(line);
 }
 
 /* Mount hook, called from apply_emulated_mount() — the common point for BOTH
