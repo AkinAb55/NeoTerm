@@ -346,6 +346,19 @@ static size_t ukfs_emit_dents(struct ukfs_vfd *v, unsigned char *out, size_t cap
  * open proceeds and the fd is captured in uknl_fs_open_exit. */
 static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 {
+	/* --- TEMP DEBUG (remove after diagnosis): trace every mount(2) to the
+	 * proot stderr (the guest PTY), so `mount /dev/uksd0 ...` prints what the
+	 * redirect actually sees. --- */
+	if (nr == PR_mount) {
+		word_t dsa = peek_reg(tracee, CURRENT, SYSARG_1);
+		char dbg[PATH_MAX] = {0};
+		if (dsa) read_string(tracee, dbg, dsa, sizeof dbg);
+		fprintf(stderr, "[uk_fs] PR_mount src='%s' UK_FS='%s' UK_BLOCK='%s' is_dev=%d\n",
+		        dbg, getenv("UK_FS") ? getenv("UK_FS") : "(null)",
+		        getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)", ukfs_src_is_dev(dbg));
+		fflush(stderr);
+	}
+
 	if (!uk_fs_on()) return false;
 
 	/* mount(2): only a /dev/uksd0 source is ours; everything else falls through
