@@ -982,4 +982,46 @@ if 'uk_fs_sysnums' not in s:
                   '\t}', 1)
     wr(SC, s)
 
+# ---- path/proc.c: resolve "/proc/self" + "/proc/thread-self" in readlink_proc's
+#      @base to the tracee's pid. fd magic-links reached via a binding whose target
+#      contains "self" (we bind /proc/self/fd -> /dev/fd and /proc/self/fd/{0,1,2}
+#      -> /dev/std{in,out,err}) otherwise hit atoi("self")==0 -> DEFAULT, so PRoot
+#      readlink()s them in its OWN context (wrong pid) -> ENOENT. That breaks shell
+#      process substitution ("grep: /dev/fd/63: No such file or directory"). With the
+#      pid substituted, the /proc/<pid>/fd/<n> branch returns DONT_CANONICALIZE and
+#      the anonymous pipe/socket link is left intact for the tracee to open. ----
+PC = ROOT + "/path/proc.c"; s = rd(PC)
+if 'NeoTerm: normalize "/proc/self"' not in s:
+    pc_anchor = ('\tconst Tracee *known_tracee;\n'
+                 '\tchar proc_path[64]; /* 64 > sizeof("/proc//fd/") + 2 * sizeof(#ULONG_MAX) */\n'
+                 '\tint status;\n'
+                 '\tpid_t pid;\n')
+    must(pc_anchor in s, "proc.c readlink_proc decls anchor")
+    s = s.replace(pc_anchor,
+                  '\tconst Tracee *known_tracee;\n'
+                  '\tchar proc_path[64]; /* 64 > sizeof("/proc//fd/") + 2 * sizeof(#ULONG_MAX) */\n'
+                  '\tchar base_buf[PATH_MAX];\n'
+                  '\tint status;\n'
+                  '\tpid_t pid;\n'
+                  '\n'
+                  '\t/* NeoTerm: normalize "/proc/self" and "/proc/thread-self" in @base to the\n'
+                  '\t * tracee\'s numeric pid, so fd magic-links reached via a binding whose target\n'
+                  '\t * contains "self" (e.g. -b /proc/self/fd:/dev/fd) are handled by the per-pid\n'
+                  '\t * branch below instead of being readlink()\'d in PRoot\'s own context. */\n'
+                  '\t{\n'
+                  '\t\tconst char *rest = NULL;\n'
+                  '\t\tif (strncmp(base, "/proc/self", 10) == 0 && (base[10] == \'/\' || base[10] == \'\\0\'))\n'
+                  '\t\t\trest = base + 10;\n'
+                  '\t\telse if (strncmp(base, "/proc/thread-self", 17) == 0 && (base[17] == \'/\' || base[17] == \'\\0\'))\n'
+                  '\t\t\trest = base + 17;\n'
+                  '\t\tif (rest != NULL) {\n'
+                  '\t\t\tstatus = snprintf(base_buf, sizeof(base_buf), "/proc/%d%s", tracee->pid, rest);\n'
+                  '\t\t\tif (status < 0 || (size_t) status >= sizeof(base_buf))\n'
+                  '\t\t\t\treturn -EPERM;\n'
+                  '\t\t\tbase = base_buf;\n'
+                  '\t\t\tcomparison = compare_paths("/proc", base);\n'
+                  '\t\t}\n'
+                  '\t}\n', 1)
+    wr(PC, s)
+
 print("ALL PATCHES APPLIED OK")
