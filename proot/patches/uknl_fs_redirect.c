@@ -673,6 +673,27 @@ static void ukfs_populate_fd(Tracee *tracee, int fd, const char *relpath)
 	{ char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: mmap populate fd=%d bytes=%lld p='%s'\n", fd, off, relpath); uk_dbg_line(l); }
 }
 
+/* Lexical path canonicalisation: collapse "." and ".." and redundant slashes
+ * (no symlink following — the guest paths here are already vmount-logical). Used
+ * to turn a chdir target into a clean absolute guest path for the cwd. */
+static void ukfs_canon(const char *in, char *out, size_t osz)
+{
+	char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s", in);
+	const char *parts[256]; int np = 0; char *save = 0;
+	for (char *t = strtok_r(tmp, "/", &save); t; t = strtok_r(0, "/", &save)) {
+		if (t[0] == '.' && t[1] == '\0') continue;
+		if (t[0] == '.' && t[1] == '.' && t[2] == '\0') { if (np > 0) np--; continue; }
+		if (np < 256) parts[np++] = t;
+	}
+	if (np == 0) { snprintf(out, osz, "/"); return; }
+	size_t o = 0; out[0] = '\0';
+	for (int i = 0; i < np && o + 1 < osz; i++) {
+		int w = snprintf(out + o, osz - o, "/%s", parts[i]);
+		if (w < 0) break;
+		o += (size_t) w;
+	}
+}
+
 static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 {
 	/* --- TEMP DEBUG v3: one-time INIT line at the first syscall (shows the raw
@@ -682,7 +703,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v33-dbgdir UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v34-chdir UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -734,6 +755,40 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 
 	if (!g_vmounted) return false;
 	ukfs_ensure_mounted();   /* perform the deferred ukfsd MOUNT on first access */
+
+	/* chdir/fchdir INTO the vmount. proot would translate the target to the (empty)
+	 * host shadow and lstat it -> ENOENT, so `cd` into the mounted FS fails and any
+	 * tool that then uses RELATIVE paths (mkdir -p, configure, git, make) breaks
+	 * because tracee->fs->cwd isn't a vmount path. Validate the target is a ukfs
+	 * directory, set the guest cwd to its canonical vmount path ourselves so
+	 * ukfs_rel_at(AT_FDCWD, …) resolves subsequent relative ops, and void the
+	 * syscall (proot's exit handler forces chdir's result to 0). */
+	if (nr == PR_chdir) {
+		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1);
+		char gp[PATH_MAX];
+		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
+		char abs[2 * PATH_MAX], canon[PATH_MAX], rel[PATH_MAX];
+		if (gp[0] == '/') snprintf(abs, sizeof abs, "%s", gp);
+		else { const char *cwd = (tracee->fs && tracee->fs->cwd) ? tracee->fs->cwd : "/"; snprintf(abs, sizeof abs, "%s/%s", cwd, gp); }
+		ukfs_canon(abs, canon, sizeof canon);
+		if (!ukfs_rel(canon, rel, sizeof rel)) return false;     /* not under vmount: let proot handle */
+		unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
+		int q = ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks);
+		if (q != 0 || (mode & 0170000) != 0040000) return false; /* not a ukfs dir: let proot fail it */
+		char *tmp = talloc_strdup(tracee->fs, canon);
+		if (tmp) { TALLOC_FREE(tracee->fs->cwd); tracee->fs->cwd = tmp; talloc_set_name_const(tracee->fs->cwd, "$cwd"); }
+		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
+	}
+	if (nr == PR_fchdir) {
+		struct ukfs_vfd *v = vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1));
+		if (!v || !v->isdir) return false;
+		char canon[PATH_MAX];
+		if (v->path[0] == '/' && v->path[1] == '\0') snprintf(canon, sizeof canon, "%s", g_vmount);
+		else snprintf(canon, sizeof canon, "%s%s", g_vmount, v->path);
+		char *tmp = talloc_strdup(tracee->fs, canon);
+		if (tmp) { TALLOC_FREE(tracee->fs->cwd); tracee->fs->cwd = tmp; talloc_set_name_const(tracee->fs->cwd, "$cwd"); }
+		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
+	}
 
 	/* mmap(2)/mmap2(2) on a vfd: materialise the real content into the placeholder
 	 * inode the guest is about to map, then let the native mmap proceed. mmap fd is

@@ -37,7 +37,8 @@ enum { PR_void = 0, PR_mount, PR_newfstatat, PR_fstatat64, PR_statx,
        PR_dup, PR_dup2, PR_dup3, PR_access, PR_faccessat, PR_faccessat2,
        PR_fsync, PR_fdatasync, PR_fchmod, PR_fchown,
        PR_setxattr, PR_lsetxattr, PR_removexattr, PR_lremovexattr,
-       PR_utimensat, PR_futimesat, PR_utimes, PR_mmap, PR_mmap2 };
+       PR_utimensat, PR_futimesat, PR_utimes, PR_mmap, PR_mmap2,
+       PR_chdir, PR_fchdir };
 #ifndef EXDEV
 #define EXDEV 18
 #endif
@@ -59,6 +60,10 @@ typedef struct { Path host; Path guest; } Binding;
 enum { GUEST, HOST };
 static Binding *get_binding(Tracee *t, int side, char path[PATH_MAX]) { (void)t;(void)side;(void)path; return 0; }
 static int translate_path(Tracee *t, char result[PATH_MAX], int dir_fd, const char *user_path, bool deref) { (void)t;(void)dir_fd;(void)user_path;(void)deref; if (result) result[0] = 0; return -1; }
+/* talloc stubs (proot manages tracee->fs->cwd via talloc; the chdir handler uses these) */
+#define TALLOC_FREE(p) do { free(p); (p) = 0; } while (0)
+static char *talloc_strdup(void *ctx, const char *s) { (void)ctx; return s ? strdup(s) : 0; }
+static void  talloc_set_name_const(const void *p, const char *n) { (void)p; (void)n; }
 
 /* block proxy socket helpers (injected just above the FS block in enter.c). The
  * getdents test drives them through a canned, scriptable response. */
