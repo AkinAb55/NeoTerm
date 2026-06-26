@@ -546,6 +546,9 @@ static int ukfs_open_redirect(Tracee *tracee, const char *rel, int flags)
 		} else {
 			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOENT); set_sysnum(tracee, PR_void); return 1;
 		}
+	} else if ((flags & O_CREAT) && (flags & O_EXCL)) {
+		/* O_CREAT|O_EXCL on an existing file -> EEXIST (proper semantics). */
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EEXIST); set_sysnum(tracee, PR_void); return 1;
 	}
 	if ((flags & O_DIRECTORY) && !isdir) {
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOTDIR); set_sysnum(tracee, PR_void); return 1;
@@ -569,7 +572,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v13-autoumount UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v14-oexcl UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -897,7 +900,15 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		char rel[PATH_MAX];
 		if (!ukfs_rel_at(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)) return false;
 		int flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
-		return ukfs_open_redirect(tracee, rel, flags) == 1;
+		int r = ukfs_open_redirect(tracee, rel, flags);
+		if (r == 0)
+			/* The placeholder is /dev/null (or "/"); strip O_CREAT/O_EXCL/O_TRUNC/
+			 * O_DIRECTORY so the real open of it always succeeds. Otherwise an
+			 * O_EXCL create (e.g. plain `cp`) hits "File exists" on /dev/null, and
+			 * O_DIRECTORY|<file> would wrongly fail. Create/trunc already happened
+			 * on the FS side. */
+			poke_reg(tracee, SYSARG_3, (word_t)(unsigned)(flags & ~(O_CREAT | O_EXCL | O_TRUNC | O_DIRECTORY)));
+		return r == 1;
 	}
 	if (nr == PR_openat2) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2);
@@ -912,7 +923,16 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		unsigned long long how[3] = { 0, 0, 0 };
 		size_t n = (size_t) howsz; if (n > sizeof how) n = sizeof how;
 		if (!howp || n < 8 || read_data(tracee, how, howp, n) < 0) return false;
-		return ukfs_open_redirect(tracee, rel, (int) how[0]) == 1;
+		int r = ukfs_open_redirect(tracee, rel, (int) how[0]);
+		if (r == 0) {
+			/* Same placeholder-flag strip as openat, plus clear the resolve field
+			 * so the absolute /dev/null placeholder isn't rejected by a
+			 * RESOLVE_BENEATH/RESOLVE_IN_ROOT restriction. Write open_how back. */
+			how[0] &= ~(unsigned long long)(O_CREAT | O_EXCL | O_TRUNC | O_DIRECTORY);
+			how[2] = 0;
+			write_data(tracee, howp, how, n);
+		}
+		return r == 1;
 	}
 
 	return false;
