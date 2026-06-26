@@ -706,7 +706,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v36-getdents UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v37-getdfix UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -884,6 +884,12 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		}
 		if (w) write_data(tracee, buf, tmp, w);
 		free(tmp);
+		{ char l[96]; snprintf(l, sizeof l, "uk_fs: getdents '%s' emit=%zu idx=%d/%d\n", v->path, w, v->dent_idx, v->dent_n); uk_dbg_line(l); }
+		/* getdents64 is trapped by BOTH our set AND proot's hidden_files extension,
+		 * so (like renameat) the PR_void-poked byte count can be clobbered before the
+		 * tracee resumes -> the caller sees a short/empty dir and stops recursing
+		 * (rm -rf can't descend). Re-poke the real count from uknl_fs_exit_final. */
+		pend_res_set(tracee->pid, nr, (long) w);
 		poke_reg(tracee, SYSARG_RESULT, (word_t) w); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_close) {
