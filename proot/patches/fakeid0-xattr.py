@@ -870,12 +870,16 @@ if 'uknl_block_dispatch' not in s:
         '}\n\n')
     s = s.replace('int translate_syscall_enter(Tracee *tracee)\n{',
                   helpers + 'int translate_syscall_enter(Tracee *tracee)\n{', 1)
-    must('\tsyscall_number = get_sysnum(tracee, ORIGINAL);\n\tswitch (syscall_number) {' in s,
-         "enter.c syscall_number switch anchor (block)")
-    s = s.replace('\tsyscall_number = get_sysnum(tracee, ORIGINAL);\n\tswitch (syscall_number) {',
+    # Inject the dispatch BEFORE notify_extensions (the fake_id0 ENTER hook): vmount
+    # paths must be handled by our redirect first, otherwise fake_id0 intercepts e.g.
+    # a chmod on the FS file and tries to persist ownership as an xattr on the
+    # non-existent host-shadow path -> EPERM (git clone "could not write config file").
+    nx_anchor = '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);'
+    must(nx_anchor in s, "enter.c notify_extensions anchor (block)")
+    s = s.replace(nx_anchor,
                   '\tsyscall_number = get_sysnum(tracee, ORIGINAL);\n'
                   '\tif (uknl_block_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
-                  '\tswitch (syscall_number) {', 1)
+                  + nx_anchor, 1)
     wr(EN, s)
 
 SC = ROOT + "/syscall/seccomp.c"; s = rd(SC)
@@ -911,12 +915,12 @@ if 'uknl_fs_dispatch' not in s:
     s = s.replace('int translate_syscall_enter(Tracee *tracee)\n{',
                   fs_c + '\nint translate_syscall_enter(Tracee *tracee)\n{', 1)
     blk_anchor = ('\tif (uknl_block_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
-                  '\tswitch (syscall_number) {')
+                  '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);')
     must(blk_anchor in s, "enter.c block-dispatch anchor (fs)")
     s = s.replace(blk_anchor,
                   '\tif (uknl_block_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
                   '\tif (uknl_fs_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
-                  '\tswitch (syscall_number) {', 1)
+                  '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);', 1)
     # mount(2) is blocked by Android's parent seccomp (SIGSYS), so it never reaches
     # translate_syscall_enter — proot's SIGSYS handler calls apply_emulated_mount()
     # directly (tracee/seccomp.c). Hook that common function so the /dev/uksd0
