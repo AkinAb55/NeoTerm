@@ -1925,6 +1925,11 @@ long ukfs_write_file_at(const char *name, const char *data, size_t len, long lon
 		inode->i_fop->open(inode, &of);
 	}
 	struct address_space *m = inode->i_mapping;
+	/* sparse write past EOF: FAT/exfat/ntfs3 here have no holes, so first zero-fill the
+	 * gap [i_size, offset) (else the gap clusters stay unallocated and the bytes written
+	 * past them are unreachable — e.g. `dd seek=N`, resumable/partial downloads). */
+	if (offset > inode->i_size)
+		generic_cont_expand_simple(inode, offset);
 	if (m->a_ops && m->a_ops->write_begin && m->a_ops->write_end) {
 		loff_t pos = offset; size_t rem = len; const char *src = data;
 		while (rem) {
