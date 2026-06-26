@@ -682,7 +682,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v32-icache UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v33-dbgdir UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -1004,7 +1004,15 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (nr == PR_mkdirat) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_2); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
-		if (!ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)) return false;
+		int mdfd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+		if (!ukfs_rel_at(tracee, mdfd, gp, rel, sizeof rel)) {
+			struct ukfs_vfd *mv = (gp[0] != '/' && mdfd != AT_FDCWD) ? vfd_find(ukfs_tgid(tracee->pid), mdfd) : NULL;
+			char l[PATH_MAX + 96];
+			snprintf(l, sizeof l, "uk_fs: MKDIR-MISS dirfd=%d gp='%s' vfd=%p tgid=%d\n",
+			         mdfd, gp, (void*) mv, ukfs_tgid(tracee->pid));
+			uk_dbg_line(l);
+			return false;
+		}
 		unsigned mode = (unsigned) peek_reg(tracee, CURRENT, SYSARG_3) & 07777;
 		char pfx[48]; snprintf(pfx, sizeof pfx, "MKDIR %u ", mode);
 		long r = ukfs_simple(pfx, rel);
@@ -1269,6 +1277,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 			v->used = 1; v->pid = pid; v->fd = (int) fd; v->isdir = pp->isdir; v->off = 0;
 			snprintf(v->path, sizeof v->path, "%s", pp->path);
 			snprintf(v->backing, sizeof v->backing, "%s", pp->backing);
+			if (pp->isdir) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: vfd+DIR fd=%ld path='%s' tgid=%d\n", fd, pp->path, pid); uk_dbg_line(l); }
 		}
 		/* Unlink the per-fd placeholder now: the guest fd keeps the inode alive
 		 * (anonymous), mmap-populate reaches it via /proc/<pid>/fd/<fd>, and it is
