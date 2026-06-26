@@ -729,7 +729,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v40-statxfix UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v41-getcwd-readlink UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -814,6 +814,23 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		char *tmp = talloc_strdup(tracee->fs, canon);
 		if (tmp) { TALLOC_FREE(tracee->fs->cwd); tracee->fs->cwd = tmp; talloc_set_name_const(tracee->fs->cwd, "$cwd"); }
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
+	}
+	/* getcwd while the cwd is under the vmount. proot's getcwd verifies the cwd by
+	 * translating "." to the host shadow and lstat'ing it — which fails (ENOENT)
+	 * for a vmount SUBDIR that lives only in ukfs, so any tool that cd's into the
+	 * mounted FS and calls getcwd (git, make, an interactive shell) breaks. Answer
+	 * it ourselves from the tracked guest cwd. */
+	if (nr == PR_getcwd) {
+		const char *cwd = (tracee->fs && tracee->fs->cwd) ? tracee->fs->cwd : "/";
+		char rel[PATH_MAX];
+		if (!ukfs_rel(cwd, rel, sizeof rel)) return false;   /* not under vmount: proot handles */
+		word_t buf = peek_reg(tracee, CURRENT, SYSARG_1);
+		size_t size = (size_t) peek_reg(tracee, CURRENT, SYSARG_2);
+		size_t len = strlen(cwd) + 1;
+		long r = (size < len) ? -ERANGE : (long) len;
+		if (r > 0 && buf) write_data(tracee, buf, cwd, len);
+		pend_res_set(tracee->pid, nr, r);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) r); set_sysnum(tracee, PR_void); return true;
 	}
 
 	/* mmap(2)/mmap2(2) on a vfd: materialise the real content into the placeholder
@@ -1021,12 +1038,14 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
 		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		pend_res_set(tracee->pid, nr, -ENOTSUP);
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - ENOTSUP); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_listxattr || nr == PR_llistxattr) {
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
 		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
+		pend_res_set(tracee->pid, nr, 0);
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;   /* no xattrs */
 	}
 	/* set/remove xattr under the vmount: no xattrs on FAT, report success (no-op).
@@ -1036,7 +1055,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		word_t pa = peek_reg(tracee, CURRENT, SYSARG_1); char gp[PATH_MAX], rel[PATH_MAX];
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
 		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
-		uk_dbg_line("uk_fs: setxattr/removexattr handled (no-op)\n");
+		pend_res_set(tracee->pid, nr, 0);
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
 	/* utimensat/utimes under the vmount: report success (same fake_id0-bypass
@@ -1051,7 +1070,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 			if (nr == PR_utimes) return false;          /* utimes needs a path */
 			if (!vfd_find(ukfs_tgid(tracee->pid), (int) peek_reg(tracee, CURRENT, SYSARG_1))) return false;
 		}
-		uk_dbg_line("uk_fs: utimensat handled (no-op)\n");
+		pend_res_set(tracee->pid, nr, 0);
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
 
@@ -1072,7 +1091,9 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		unsigned mode, uid, gid, nlink; long size, mt, at; unsigned long ino, rdev, blocks;
 		int q = ukfs_query_stat(rel, &mode, &uid, &gid, &size, &ino, &mt, &at, &nlink, &rdev, &blocks);
 		if (q == -1) return false;                 /* socket down: let host try */
-		poke_reg(tracee, SYSARG_RESULT, (word_t)(long)(q == 0 ? 0 : -ENOENT));
+		long ar = (q == 0 ? 0 : -ENOENT);
+		pend_res_set(tracee->pid, nr, ar);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ar);
 		set_sysnum(tracee, PR_void); return true;
 	}
 
@@ -1085,11 +1106,21 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (!ukfs_rel_at(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1), gp, rel, sizeof rel)) return false;
 		char tgt[PATH_MAX];
 		long n = ukfs_readlink_at(rel, tgt, sizeof tgt);
-		if (n < 0) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EINVAL); set_sysnum(tracee, PR_void); return true; }
+		if (n < 0) {
+			/* distinguish "doesn't exist" (ENOENT) from "exists but not a symlink"
+			 * (EINVAL): git readlinks HEAD to detect it, and EINPLACE of ENOENT makes
+			 * it believe a non-existent HEAD exists -> it skips writing it -> the repo
+			 * is invalid ("not in a git directory"). */
+			unsigned m2, u2, g2, nl2; long sz2, mt2, at2; unsigned long i2, rd2, bl2;
+			int q2 = ukfs_query_stat(rel, &m2, &u2, &g2, &sz2, &i2, &mt2, &at2, &nl2, &rd2, &bl2);
+			long err = (q2 == -2) ? -ENOENT : -EINVAL;
+			pend_res_set(tracee->pid, nr, err); poke_reg(tracee, SYSARG_RESULT, (word_t)(long) err); set_sysnum(tracee, PR_void); return true;
+		}
 		size_t bufsz = (size_t) peek_reg(tracee, CURRENT, SYSARG_4);
 		word_t buf = peek_reg(tracee, CURRENT, SYSARG_3);
 		if ((size_t) n > bufsz) n = (long) bufsz;
 		if (n > 0) write_data(tracee, buf, tgt, (size_t) n);
+		pend_res_set(tracee->pid, nr, n);
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) n); set_sysnum(tracee, PR_void); return true;
 	}
 
@@ -1302,7 +1333,12 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0) return false;
 		if (!ukfs_rel(gp, rel, sizeof rel)) return false;
 		char tgt[PATH_MAX]; long n = ukfs_readlink_at(rel, tgt, sizeof tgt);
-		if (n < 0) { pend_res_set(tracee->pid, nr, -EINVAL); poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EINVAL); set_sysnum(tracee, PR_void); return true; }
+		if (n < 0) {
+			unsigned m2, u2, g2, nl2; long sz2, mt2, at2; unsigned long i2, rd2, bl2;
+			int q2 = ukfs_query_stat(rel, &m2, &u2, &g2, &sz2, &i2, &mt2, &at2, &nl2, &rd2, &bl2);
+			long err = (q2 == -2) ? -ENOENT : -EINVAL;
+			pend_res_set(tracee->pid, nr, err); poke_reg(tracee, SYSARG_RESULT, (word_t)(long) err); set_sysnum(tracee, PR_void); return true;
+		}
 		size_t bufsz = (size_t) peek_reg(tracee, CURRENT, SYSARG_3); word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
 		if ((size_t) n > bufsz) n = (long) bufsz;
 		if (n > 0) write_data(tracee, buf, tgt, (size_t) n);
