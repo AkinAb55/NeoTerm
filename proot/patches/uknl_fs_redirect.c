@@ -580,7 +580,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v21-diag UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v22-diag2 UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -1002,23 +1002,37 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	}
 
 	/* TEMP DIAG (git clone EPERM): a trapped syscall reached here unhandled while a
-	 * vmount is active. If its path arg is under the vmount, fake_id0/proot handles
-	 * it next and may EPERM it (the "could not write config file" failure). fake_id0
-	 * only intercepts seccomp-trapped syscalls, so the culprit necessarily passes
-	 * through here — log its number + path to dmesg to identify it in one build. */
+	 * vmount is active, so fake_id0/proot handles it next and may EPERM it (the
+	 * "could not write config file" failure). The earlier abs-path-only filter
+	 * missed it because git's CWD is the mount, so it uses RELATIVE paths. Resolve
+	 * arg1 (legacy path-in-arg1: chmod/chown/statfs/...) against the CWD and arg2
+	 * (the *at convention: dirfd in arg1, path in arg2) against arg1's dirfd —
+	 * exactly as the real handlers do — and log any that lands under the vmount.
+	 * Also log every unhandled trapped op while the CWD itself is under the vmount,
+	 * so a culprit that passes the path by fd/relative form still shows up. */
 	{
-		char gp[PATH_MAX];
-		size_t ml = g_vmount[0] ? strlen(g_vmount) : 0;
-		for (int ai = 0; ml && ai < 2; ai++) {
-			word_t pa = peek_reg(tracee, CURRENT, ai == 0 ? SYSARG_1 : SYSARG_2);
-			if (!pa || read_string(tracee, gp, pa, sizeof gp) <= 0 || gp[0] != '/') continue;
-			if (strncmp(gp, g_vmount, ml) == 0 && (gp[ml] == '\0' || gp[ml] == '/')) {
-				char l[PATH_MAX + 96];
-				snprintf(l, sizeof l, "uk_fs: UNHANDLED nr=%lu arg%d path='%s'\n",
-				         (unsigned long) nr, ai + 1, gp);
-				uk_dbg_line(l);
-				break;
-			}
+		char gp[PATH_MAX], rel[PATH_MAX];
+		const char *cwd = (tracee->fs && tracee->fs->cwd) ? tracee->fs->cwd : "";
+		int cwd_in = ukfs_rel(cwd, rel, sizeof rel);
+		word_t a1 = peek_reg(tracee, CURRENT, SYSARG_1);
+		word_t a2 = peek_reg(tracee, CURRENT, SYSARG_2);
+		int logged = 0;
+		if (a1 && read_string(tracee, gp, a1, sizeof gp) > 0 && gp[0] &&
+		    ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel)) {
+			char l[PATH_MAX + 96];
+			snprintf(l, sizeof l, "uk_fs: UNHANDLED nr=%lu a1='%s' rel='%s'\n", (unsigned long) nr, gp, rel);
+			uk_dbg_line(l); logged = 1;
+		}
+		if (!logged && a2 && read_string(tracee, gp, a2, sizeof gp) > 0 && gp[0] &&
+		    ukfs_rel_at(tracee, (int) a1, gp, rel, sizeof rel)) {
+			char l[PATH_MAX + 96];
+			snprintf(l, sizeof l, "uk_fs: UNHANDLED nr=%lu a2='%s' rel='%s'\n", (unsigned long) nr, gp, rel);
+			uk_dbg_line(l); logged = 1;
+		}
+		if (!logged && cwd_in) {
+			char l[96];
+			snprintf(l, sizeof l, "uk_fs: UNHANDLED nr=%lu (cwd in vmount, no path arg)\n", (unsigned long) nr);
+			uk_dbg_line(l);
 		}
 	}
 	return false;
