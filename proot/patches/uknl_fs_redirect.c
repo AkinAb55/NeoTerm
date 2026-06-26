@@ -918,9 +918,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		if (uo != un) {     /* across the vmount boundary: let userspace copy+unlink */
 			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EXDEV); set_sysnum(tracee, PR_void); return true;
 		}
-		long rr = ukfs_two_path("RENAME", orel, nrel);
-		{ char l[2*PATH_MAX+96]; snprintf(l, sizeof l, "uk_fs: RENAME '%s' -> '%s' uo=%d un=%d ret=%ld\n", orel, nrel, uo, un, rr); uk_dbg_line(l); }
-		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) rr); set_sysnum(tracee, PR_void); return true;
+		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) ukfs_two_path("RENAME", orel, nrel)); set_sysnum(tracee, PR_void); return true;
 	}
 
 	/* openat under the vmount: rewrite the path to a real placeholder so the

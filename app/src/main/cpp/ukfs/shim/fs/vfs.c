@@ -1281,13 +1281,12 @@ long ukfs_rename(const char *oldpath, const char *newpath)
 	if (!g_api_root) return -1;
 	struct inode *odir = 0, *ndir = 0; struct dentry *opd = 0, *npd = 0;
 	const char *oleaf = 0, *nleaf = 0;
-	fprintf(stderr, "ukfsd: rename ENTER '%s' -> '%s'\n", oldpath, newpath); fflush(stderr);
 	struct dentry *ode = api_walk(oldpath, &odir, &opd, &oleaf);
-	if (!odir || !ode || !ode->d_inode) { fprintf(stderr, "ukfsd: rename: src '%s' missing (odir=%p ode=%p ino=%p)\n", oldpath, (void*)odir, (void*)ode, ode?(void*)ode->d_inode:0); fflush(stderr); return -2; }     /* a forrás nincs (-ENOENT) */
+	if (!odir || !ode || !ode->d_inode) return -2;     /* a forrás nincs (-ENOENT) */
 	char osave[256]; strncpy(osave, oleaf, sizeof(osave)-1); osave[sizeof(osave)-1]=0;  /* g_leafbuf-ot a 2. walk felülírja */
 	struct dentry *nde = api_walk(newpath, &ndir, &npd, &nleaf);
-	if (!ndir || !nleaf) { fprintf(stderr, "ukfsd: rename: bad dst '%s' (ndir=%p nleaf=%p)\n", newpath, (void*)ndir, (void*)nleaf); fflush(stderr); return -1; }                    /* rossz cél-út */
-	if (!odir->i_op || !odir->i_op->rename) { fprintf(stderr, "ukfsd: rename: no ->rename op\n"); fflush(stderr); return -1; }
+	if (!ndir || !nleaf) return -1;                    /* rossz cél-út */
+	if (!odir->i_op || !odir->i_op->rename) return -1;
 	ode->d_parent = opd;
 	ode->d_name.name = (const unsigned char *)strdup(osave);
 	ode->d_name.len = strlen(osave);
@@ -1298,7 +1297,6 @@ long ukfs_rename(const char *oldpath, const char *newpath)
 	nde->d_name.len = strlen(nleaf);
 	struct inode *moved = ode->d_inode;
 	int e = odir->i_op->rename(&nop_mnt_idmap, odir, ode, ndir, nde, 0);
-	fprintf(stderr, "ukfsd: rename driver ret=%d\n", e); fflush(stderr);
 	if (e) return e;
 	/* ha a rename felülírt egy meglévő célt, a régi cél-inode-ot evictálni kell (dtime + bitmap),
 	 * mint az unlinknál — különben fsck "Deleted inode has zero dtime" / count wrong. */
