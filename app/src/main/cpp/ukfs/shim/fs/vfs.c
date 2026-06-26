@@ -613,7 +613,12 @@ void super_set_uuid(struct super_block *sb, const u8 *uuid, unsigned len) { (voi
 
 /* ===== linker-kielégítő stubok (a minimál read-úton nem hívódnak, vagy no-op) ===== */
 #include <stdarg.h>
-int _printk(const char *fmt, ...) { va_list a; va_start(a, fmt); int r = vfprintf(stderr, fmt, a); va_end(a); return r; }
+/* Route _printk through vprintk (uk_vformat) so kernel format extensions like
+ * %pV (struct va_format, used by fat_fs_error/_fat_msg) are formatted correctly
+ * and the message goes through loglevel filtering + the dmesg buffer. The raw
+ * vfprintf here does NOT understand %pV, which printed FAT errors as a bare
+ * pointer + literal 'V' ("FAT-fs (): 0x... V") and hid the real message. */
+int _printk(const char *fmt, ...) { va_list a; va_start(a, fmt); int r = vprintk(fmt, a); va_end(a); return r; }
 void panic(const char *fmt, ...) { va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); abort(); }
 s64 div_s64_rem(s64 dividend, s32 divisor, s32 *remainder) { if (remainder) *remainder = dividend % divisor; return dividend / divisor; }
 unsigned int inode_time_dirty_flag(struct inode *i, int f) { (void)i; (void)f; return 0; }
