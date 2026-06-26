@@ -256,6 +256,8 @@ static int handle(int fd, char *line)
 	}
 	if (!strcmp(line, "UMOUNT"))  return reply_ok(fd);
 	if (!strcmp(line, "STATFS"))  return do_statfs(fd);
+	if (!strcmp(line, "SYNC"))    { ukfs_sync_path(0);        return reply_ok(fd); }   /* whole-FS flush */
+	if (!strncmp(line, "SYNC ", 5)) { ukfs_sync_path(np(line+5)); return reply_ok(fd); }
 
 	if (!strncmp(line, "STAT ", 5))     return do_stat(fd, np(line + 5));
 	if (!strncmp(line, "LIST ", 5))     return do_list(fd, np(line + 5));

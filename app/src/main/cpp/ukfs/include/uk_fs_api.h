@@ -31,6 +31,9 @@ long ukfs_write_file(const char *name, const char *data, size_t len);
 /* OFFSET-tudatos írás (sparse fájlokhoz): a [offset,offset+len) tartomány írása, a többi LYUK marad;
  * nem vág 0-ra, nem állít méretet, létrehozza a fájlt ha nincs. 0/len=siker, <0=hiba. */
 long ukfs_write_file_at(const char *name, const char *data, size_t len, long long offset);
+/* a megadott fájl (vagy az egész FS) perzisztálása a block-eszközre — a write-út
+ * elhalasztott flush-ének párja, a redirect close-kor küldi (SYNC). 0=siker. */
+long ukfs_sync_path(const char *name);
 /* alkönyvtár létrehozása a VALÓDI driver i_op->mkdir-jával; 0=siker, <0=hiba */
 long ukfs_mkdir(const char *name);
 /* special fájl (FIFO/device-node/socket) a driver i_op->mknod-jával; 0=siker, -38=ENOSYS (vfat/exfat) */

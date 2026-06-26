@@ -1162,6 +1162,18 @@ static void uk_flush_meta(struct inode *inode, struct inode *dir)
 	if (do_sy) sync_blockdev(wsb->s_bdev);
 }
 
+/* Refresh the inode (+ optional dir) dir-entry in the buffer cache WITHOUT a
+ * block-device sync — the cheap per-write() path; ukfs_sync_path() flushes later. */
+static void uk_meta_inode_only(struct inode *inode, struct inode *dir)
+{
+	struct super_block *wsb = inode->i_sb;
+	if (wsb->s_op && wsb->s_op->write_inode) {
+		struct writeback_control wbc; memset(&wbc, 0, sizeof(wbc)); wbc.sync_mode = WB_SYNC_NONE;
+		wsb->s_op->write_inode(inode, &wbc);
+		if (dir) wsb->s_op->write_inode(dir, &wbc);
+	}
+}
+
 /* ===== ukfs_mkdir: alkönyvtár létrehozása a VALÓDI driver i_op->mkdir-jával ===== */
 long ukfs_mkdir(const char *name)
 {
@@ -1840,8 +1852,31 @@ long ukfs_write_file_at(const char *name, const char *data, size_t len, long lon
 		ssize_t w = inode->i_fop->write_iter(&iocb, &iter);
 		if (w < 0) return w;
 	} else return -4;
-	uk_flush_meta(inode, dir);
+	/* Keep the dir-entry/inode metadata current in the buffer cache (size grows as
+	 * the file is written), but DON'T sync to the block device here: sync_blockdev
+	 * writes the whole dirty-buffer list, so doing it per write() is O(n^2) for a
+	 * large file (wget/dd writing in small chunks). The data pages + metadata stay
+	 * dirty in cache; the redirect sends SYNC on close, which flushes once (O(n)).
+	 * In-session reads/stats are served from the page cache, so they stay correct. */
+	uk_meta_inode_only(inode, dir);
 	return len;
+}
+
+/* Flush a written file to the block device — the deferred counterpart of the
+ * per-write fast path above, invoked via the redirect's SYNC on close. */
+long ukfs_sync_path(const char *name)
+{
+	if (!g_api_root) return -1;
+	struct dentry *d = (!name || !*name) ? g_api_root : api_lookup(name);
+	struct inode *in = (d && d->d_inode) ? d->d_inode : 0;
+	if (!in) {                       /* file gone (e.g. renamed away): sync the whole FS */
+		struct super_block *sb = g_api_root->d_sb;
+		if (sb && sb->s_op && sb->s_op->sync_fs) sb->s_op->sync_fs(sb, 1);
+		if (sb) sync_blockdev(sb->s_bdev);
+		return 0;
+	}
+	uk_flush_meta(in, 0);            /* write_inode + sync_fs + sync_blockdev */
+	return 0;
 }
 
 /* ntfs3 metaadat-olvasás: __getblk + __filemap_get_folio a blokk-backendről */

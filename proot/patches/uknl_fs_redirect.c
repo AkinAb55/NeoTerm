@@ -331,7 +331,7 @@ static int ukfs_two_path(const char *cmd, const char *a, const char *b)
  *      every read/lseek/getdents/close on it is proxied here. ---- */
 struct ukfs_dent { unsigned long long ino; int type; char name[256]; };
 struct ukfs_vfd {
-	int used, pid, fd, isdir;
+	int used, pid, fd, isdir, wrote;   /* wrote: needs a SYNC on close (deferred flush) */
 	long long off;                  /* regular-file read cursor */
 	char path[PATH_MAX];            /* vmount-relative */
 	struct ukfs_dent *dents;        /* dir: parsed LIST incl. "." and ".." */
@@ -577,7 +577,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v16-fchmod UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v17-syncperf UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -665,6 +665,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		free(tmp);
 		if (n < 0) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EIO); set_sysnum(tracee, PR_void); return true; }
 		if (nr == PR_write) v->off += n;
+		v->wrote = 1;          /* defer the block-device flush to close (SYNC) */
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) n); set_sysnum(tracee, PR_void); return true;
 	}
 	if (nr == PR_ftruncate) {
@@ -712,15 +713,21 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	}
 	if (nr == PR_close) {
 		struct ukfs_vfd *v = vfd_find(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_1));
-		if (v) vfd_free(v);
+		if (v) {
+			/* Flush deferred writes once, here, instead of per write() — the latter
+			 * is O(n^2) (each sync rewrites the whole dirty-buffer list). */
+			if (v->wrote) (void) ukfs_simple("SYNC ", v->path);
+			vfd_free(v);
+		}
 		return false;          /* let the real close of the placeholder fd run */
 	}
-	/* fsync/fdatasync on a vfd: ukfs writes are already flushed (uk_flush_meta),
-	 * and the placeholder fd is /dev/null whose fsync returns EINVAL — which makes
-	 * editors report "Error writing ...: Invalid argument". Report success. */
+	/* fsync/fdatasync on a vfd: flush the deferred writes (data is otherwise only in
+	 * ukfsd's page cache until close). The placeholder fd is /dev/null, whose fsync
+	 * returns EINVAL — which makes editors report "Error writing: Invalid argument". */
 	if (nr == PR_fsync || nr == PR_fdatasync) {
 		struct ukfs_vfd *v = vfd_find(tracee->pid, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v) return false;
+		if (v->wrote) { (void) ukfs_simple("SYNC ", v->path); v->wrote = 0; }
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
 	/* fd-based metadata on a vfd. The placeholder is /dev/null, so fchmod/fchown on
