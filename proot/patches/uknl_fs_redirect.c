@@ -587,7 +587,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v24-eperm UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v25-eperm32 UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -1051,8 +1051,8 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 	 * (-1) while a vmount is active — that's the culprit, by number. EPERM is rare,
 	 * so this is near-silent; the decoder maps the number to a name. */
 	if (g_vmounted) {
-		long res = (long) peek_reg(tracee, CURRENT, SYSARG_RESULT);
-		if (res == -1) {       /* -EPERM */
+		int res = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);   /* 32-bit, like fake_id0 */
+		if (res == -1 || res == -13) {       /* -EPERM / -EACCES */
 			char gp[PATH_MAX], rel[PATH_MAX]; char pbuf[PATH_MAX + 8]; pbuf[0] = 0;
 			word_t a1 = peek_reg(tracee, ORIGINAL, SYSARG_1);
 			word_t a2 = peek_reg(tracee, ORIGINAL, SYSARG_2);
@@ -1063,7 +1063,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 			         ukfs_rel_at(tracee, (int) a1, gp, rel, sizeof rel))
 				snprintf(pbuf, sizeof pbuf, " a2='%s'", gp);
 			char l[PATH_MAX + 96];
-			snprintf(l, sizeof l, "uk_fs: EPERM-EXIT nr=%lu%s\n", (unsigned long) nr, pbuf);
+			snprintf(l, sizeof l, "uk_fs: EPERM-EXIT nr=%lu res=%d%s\n", (unsigned long) nr, res, pbuf);
 			uk_dbg_line(l);
 		}
 	}
