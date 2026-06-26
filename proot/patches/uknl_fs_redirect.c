@@ -587,7 +587,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v23-reply UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v24-eperm UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -1042,6 +1042,31 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 {
 	if (!uk_fs_on()) return;
 	int pid = tracee->pid;
+
+	/* TEMP DIAG (git clone EPERM): NO ukfsd command failed during the config write
+	 * (CREATE/WRITE/RENAME all OK; the only ERRs were a harmless EEXIST mkdir and an
+	 * ENOENT rollback unlink), yet git still saw EPERM. So the -EPERM is poked onto
+	 * some syscall's RESULT register by fake_id0 or a real translated syscall, not
+	 * returned by the FS engine. Log every syscall that EXITS with exactly -EPERM
+	 * (-1) while a vmount is active — that's the culprit, by number. EPERM is rare,
+	 * so this is near-silent; the decoder maps the number to a name. */
+	if (g_vmounted) {
+		long res = (long) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		if (res == -1) {       /* -EPERM */
+			char gp[PATH_MAX], rel[PATH_MAX]; char pbuf[PATH_MAX + 8]; pbuf[0] = 0;
+			word_t a1 = peek_reg(tracee, ORIGINAL, SYSARG_1);
+			word_t a2 = peek_reg(tracee, ORIGINAL, SYSARG_2);
+			if (a1 && read_string(tracee, gp, a1, sizeof gp) > 0 && gp[0] == '/' &&
+			    ukfs_rel_at(tracee, AT_FDCWD, gp, rel, sizeof rel))
+				snprintf(pbuf, sizeof pbuf, " a1='%s'", gp);
+			else if (a2 && read_string(tracee, gp, a2, sizeof gp) > 0 && gp[0] == '/' &&
+			         ukfs_rel_at(tracee, (int) a1, gp, rel, sizeof rel))
+				snprintf(pbuf, sizeof pbuf, " a2='%s'", gp);
+			char l[PATH_MAX + 96];
+			snprintf(l, sizeof l, "uk_fs: EPERM-EXIT nr=%lu%s\n", (unsigned long) nr, pbuf);
+			uk_dbg_line(l);
+		}
+	}
 
 	/* dup/dup2/dup3 of a vfd: make the new fd number alias the same ukfs path.
 	 * Without this, a write through a redirected fd is lost: `echo > file` opens
