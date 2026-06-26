@@ -363,9 +363,19 @@ void inode_lock_shared(struct inode *i) { (void)i; }
 void inode_unlock_shared(struct inode *i) { (void)i; }
 void inode_dio_wait(struct inode *i) { (void)i; }
 int  inode_needs_sync(struct inode *i) { (void)i; return 0; }
+/* Real wall-clock time, so files created/modified through the engine get correct
+ * timestamps (FAT/exFAT encode this into the directory entry). Previously these
+ * returned epoch 0, which showed up as "Jan 1 1970" (in-memory inode) or "Jan 1
+ * 1980" (FAT clamps 0 to its 1980 minimum) in ls. */
+struct timespec64 current_time(struct inode *inode)
+{
+	(void)inode;
+	struct timespec ts; struct timespec64 t = { 0, 0 };
+	if (clock_gettime(CLOCK_REALTIME, &ts) == 0) { t.tv_sec = ts.tv_sec; t.tv_nsec = ts.tv_nsec; }
+	return t;
+}
 struct timespec64 inode_set_ctime_current(struct inode *inode)
-{ struct timespec64 t = {0,0}; if (inode) inode->__i_ctime = t; return t; }
-struct timespec64 current_time(struct inode *inode) { (void)inode; struct timespec64 t = {0,0}; return t; }
+{ struct timespec64 t = current_time(inode); if (inode) inode->__i_ctime = t; return t; }
 
 /* ===== dentry ===== */
 static struct dentry *alloc_dentry(struct super_block *sb, struct inode *inode)
