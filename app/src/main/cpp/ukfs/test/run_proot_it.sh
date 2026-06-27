@@ -174,7 +174,9 @@ def handle(c):
             if ln is None: break
             if ln=='SIZE': c.sendall(b'OK %d 512\n'%sz)
             elif ln.startswith('READ '):
-                _,o,l=ln.split(); o,l=int(o),int(l); f.seek(o); c.sendall(b'OK %d\n'%l + f.read(l))
+                _,o,l=ln.split(); o,l=int(o),int(l); f.seek(o); d=f.read(l)
+                if len(d)<l: d=d+b'\x00'*(l-len(d))   # never short-read: pad past-EOF with zeros (avoid protocol desync)
+                c.sendall(b'OK %d\n'%l + d)
             elif ln.startswith('WRITE '):
                 _,o,l=ln.split(); o,l=int(o),int(l); d=rn(l)
                 if d is None: break
@@ -275,6 +277,69 @@ if have mkfs.ext4; then
   run_e2e ext4 "$W/ext4.img"
 else
   skip "proot e2e [ext4]" "mkfs.ext4 not installed"
+fi
+
+# ── multi-partition: a Raspberry-Pi-like MBR image (FAT boot + ext4 root),
+#    BOTH partitions mounted SIMULTANEOUSLY in the guest via /dev/uksd0p1 and
+#    /dev/uksd0p2, each routed by the redirect to its own ukfsd (io.neoterm.fs.pN). ─
+if have mkfs.ext4 && have mcopy && have python3; then
+  for p in $PIDS; do kill "$p" 2>/dev/null; done; PIDS=""; sleep 0.3
+  P1S=2048; P1N=$((48*1024*1024/512)); P2S=$((P1S+P1N)); P2N=$((48*1024*1024/512)); TOT=$((P2S+P2N+2048))
+  dd if=/dev/zero of="$W/pi.img" bs=512 count="$TOT" status=none
+  dd if=/dev/zero of="$W/p1.fat" bs=512 count="$P1N" status=none
+  mkfs.vfat -F32 -n BOOT "$W/p1.fat" >/dev/null 2>&1
+  printf 'console=serial0 root=/dev/mmcblk0p2\n' > "$W/cmdline.txt"
+  MTOOLS_SKIP_CHECK=1 mcopy -i "$W/p1.fat" "$W/cmdline.txt" ::CMDLINE.TXT 2>/dev/null
+  dd if=/dev/zero of="$W/p2.ext4" bs=512 count="$P2N" status=none
+  mkfs.ext4 -q -F -L rootfs "$W/p2.ext4" >/dev/null 2>&1
+  python3 - "$W/pi.img" "$W/p1.fat" "$W/p2.ext4" "$P1S" "$P1N" "$P2S" "$P2N" <<'PY'
+import struct, sys
+img,p1,p2,s1,n1,s2,n2 = sys.argv[1],sys.argv[2],sys.argv[3],*map(int,sys.argv[4:8])
+with open(img,'r+b') as o:
+    with open(p1,'rb') as f: o.seek(s1*512); o.write(f.read())
+    with open(p2,'rb') as f: o.seek(s2*512); o.write(f.read())
+    def e(b,t,st,sc): return struct.pack('<B3sB3sII',b,b'\xfe\xff\xff',t,b'\xfe\xff\xff',st,sc)
+    o.seek(0x1BE); o.write(e(0x80,0x0C,s1,n1)); o.write(e(0x00,0x83,s2,n2)); o.write(b'\0'*32)
+    o.seek(0x1FE); o.write(b'\x55\xaa')
+PY
+  cat > "$W/mntp.c" <<'C'
+#include <sys/mount.h>
+#include <stdio.h>
+int main(int c,char**v){ if(c<3) return 2; if(mount(v[1],v[2],"auto",0,"")){perror("mount");return 1;} return 0; }
+C
+  gcc -O2 -o "$W/mntp" "$W/mntp.c" 2>/dev/null || bad "build mntp helper"
+  MP1="$W/mp1"; MP2="$W/mp2"; rm -rf "$MP1" "$MP2"; mkdir -p "$MP1" "$MP2"
+  cat > "$W/guest_parts.sh" <<EOF
+set +e
+R=0; fail(){ echo "  GUESTFAIL: \$1"; R=1; }
+$W/mntp /dev/uksd0p1 "$MP1" || fail "mount p1"
+$W/mntp /dev/uksd0p2 "$MP2" || fail "mount p2"
+# p1 (FAT) has the seeded CMDLINE.TXT; p2 (ext4) is fresh
+[ -f "$MP1/CMDLINE.TXT" ] || fail "p1 seed missing"
+# write to BOTH simultaneously
+echo bootdata > "$MP1/extra.txt" || fail "p1 write"
+mkdir -p "$MP2/etc" && echo rootdata > "$MP2/etc/hostname" || fail "p2 write"
+[ "\$(cat "$MP1/extra.txt")" = bootdata ] || fail "p1 readback"
+[ "\$(cat "$MP2/etc/hostname")" = rootdata ] || fail "p2 readback"
+# isolation: p1's file must NOT appear on p2 and vice-versa
+ls "$MP1" | grep -q hostname && fail "p1 leaked p2 content" || true
+ls "$MP2" | grep -q CMDLINE && fail "p2 leaked p1 content" || true
+ls "$MP2" | grep -q '^etc\$' || fail "p2 etc missing"
+echo "GUEST_RESULT=\$R"
+EOF
+  python3 "$W/blk.py" "$BSOCK" "$W/pi.img" >"$W/blk_parts.log" 2>&1 & PIDS="$PIDS $!"
+  UKFSD_BLOCKSOCK="$BSOCK" "$W/ukfsd" "io.neoterm.fs.p1" >"$W/ukfsd_p1.log" 2>&1 & PIDS="$PIDS $!"
+  UKFSD_BLOCKSOCK="$BSOCK" "$W/ukfsd" "io.neoterm.fs.p2" >"$W/ukfsd_p2.log" 2>&1 & PIDS="$PIDS $!"
+  sleep 0.6
+  out="$(UK_FS=1 UK_BLOCK=1 "$W/prsrc/proot" -0 /bin/sh "$W/guest_parts.sh" 2>&1)"
+  echo "$out" | sed "s/^/    [parts] /"
+  if echo "$out" | grep -q "GUEST_RESULT=0"; then
+    ok "proot e2e [parts]: /dev/uksd0p1 (FAT) + /dev/uksd0p2 (ext4) mounted SIMULTANEOUSLY"
+  else
+    bad "proot e2e [parts]: simultaneous multi-partition mount"
+  fi
+else
+  skip "proot e2e [parts]" "mkfs.ext4 / mcopy / python3 missing"
 fi
 
 echo

@@ -26,103 +26,169 @@ static int uk_fs_on(void)
 /* TEMP debug: append a line to the app kmsg buffer (defined later, near uk_dbg). */
 static void uk_dbg_line(const char *line);
 
-/* ---- persistent io.neoterm.fs connection (ukfsd holds one mount per conn) ---- */
-static int  g_ukfs_sock = -1;
-static char g_vmount[PATH_MAX];      /* guest mount point, e.g. "/mnt/usb" */
-static int  g_vmounted = 0;          /* guest issued mount here; cleared only on umount */
-static int  g_ukfs_ready = 0;        /* 1 once ukfsd has actually mounted on g_ukfs_sock */
+/* ---- io.neoterm.fs connections — one MOUNT per connection, one connection per
+ * mounted partition. A multi-partition device (e.g. a Raspberry Pi card: FAT boot
+ * + ext4 root) is exposed as /dev/uksd0pN; each guest mount gets its own slot
+ * here, its own ukfsd (listening on io.neoterm.fs.pN), and its own connection.
+ * The whole-device /dev/uksd0 maps to io.neoterm.fs. g_am ("active mount") is set
+ * by ukfs_rel() / the fd-op path BEFORE each ukfsd request, so ukfs_conn() talks
+ * to the right daemon. proot's tracer is single-threaded (one tracee syscall at a
+ * time), so a global active-mount index is race-free. */
+#define UK_MAXM 8
+struct ukm {
+	int  used;
+	char vmount[PATH_MAX];   /* guest mount point, e.g. "/mnt/boot" */
+	char token[64];          /* device token: "uksd0", "uksd0p1", ... */
+	char fsname[64];         /* ukfsd socket: "io.neoterm.fs", "io.neoterm.fs.p1", ... */
+	int  sock;               /* this mount's connection (-1 = none) */
+	int  ready;              /* ukfsd has MOUNTed on sock */
+};
+static struct ukm g_m[UK_MAXM];
+static int g_nm = 0;             /* number of registered mounts */
+static int g_am = -1;            /* active mount index (set before each request) */
 
-static int ukfs_conn(void)
+static int  ukfs_block_present(void);   /* fwd (defined below) */
+
+/* Parse a mount source: if it names our virtual block device or one of its
+ * partitions, fill token ("uksd0"/"uksd0pN") + fsname (its io.neoterm.fs[.pN]
+ * socket) and return 1; else 0. */
+static int ukfs_dev_token(const char *src, char *token, size_t tcap, char *fsname, size_t fcap)
 {
-	if (g_ukfs_sock >= 0) return g_ukfs_sock;
-	int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-	if (s < 0) return -1;
-	struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
-	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-	setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-	struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
-	const char *name = "io.neoterm.fs";
-	a.sun_path[0] = '\0'; strncpy(a.sun_path + 1, name, sizeof(a.sun_path) - 2);
-	socklen_t len = sizeof(a.sun_family) + 1 + strlen(name);
-	if (connect(s, (struct sockaddr *) &a, len) < 0) {
-		char l[80]; snprintf(l, sizeof l, "uk_fs: connect io.neoterm.fs FAILED errno=%d\n", errno);
-		uk_dbg_line(l); close(s); return -1;
+	const char *b = strrchr(src, '/'); b = b ? b + 1 : src;
+	if (strcmp(b, "uksd0") == 0) {
+		snprintf(token, tcap, "uksd0"); snprintf(fsname, fcap, "io.neoterm.fs"); return 1;
 	}
-	g_ukfs_sock = s;
-	{ char l[64]; snprintf(l, sizeof l, "uk_fs: connected io.neoterm.fs fd=%d\n", s); uk_dbg_line(l); }
-	return s;
+	if (strncmp(b, "uksd0p", 6) == 0 && b[6]) {
+		for (const char *p = b + 6; *p; p++) if (*p < '0' || *p > '9') return 0;
+		snprintf(token, tcap, "%s", b);                 /* "uksd0p2" */
+		snprintf(fsname, fcap, "io.neoterm.fs.%s", b + 5); /* "io.neoterm.fs.p2" */
+		return 1;
+	}
+	return 0;
 }
-/* Drop the io.neoterm.fs connection. The mount lives in the connection, so the
- * ukfsd-side mount is gone too -> clear g_ukfs_ready (next access re-mounts). Do
- * NOT touch g_vmounted: the guest still has /dev/uksd0 mounted at g_vmount, and
- * clearing it would disable ukfs_rel() and the dispatch guard, leaking every
- * path op under the mount point to the host (empty dir). Only a real guest
- * umount clears g_vmounted. */
-static void ukfs_sdrop(void) { if (g_ukfs_sock >= 0) { close(g_ukfs_sock); g_ukfs_sock = -1; } g_ukfs_ready = 0; }
-
-/* guest sees the block device at .../uksd0 (same convention as the block proxy) */
+/* True iff src names our block device or a partition of it. */
 static int ukfs_src_is_dev(const char *p)
+{ char t[64], f[64]; return ukfs_dev_token(p, t, sizeof t, f, sizeof f); }
+
+/* Drop the active mount's connection. The mount lives in the connection, so the
+ * ukfsd-side mount is gone too -> clear ready (next access re-mounts). The slot
+ * stays registered (the guest still has it mounted at its vmount). */
+static void ukfs_sdrop(void)
+{ if (g_am < 0 || g_am >= UK_MAXM) return; struct ukm *m = &g_m[g_am]; if (m->sock >= 0) { close(m->sock); m->sock = -1; } m->ready = 0; }
+
+/* Free a mount slot entirely (real guest umount, or the backing device vanished). */
+static void ukfs_unmount_slot(int i)
 {
-	size_t n = strlen(p);
-	return n >= 6 && strcmp(p + n - 6, "/uksd0") == 0;
+	if (i < 0 || i >= UK_MAXM || !g_m[i].used) return;
+	if (g_m[i].ready && g_m[i].sock >= 0) {
+		char line[32];
+		if (uksd_wn(g_m[i].sock, "UMOUNT\n", 7) >= 0) uksd_rl(g_m[i].sock, line, sizeof line);
+	}
+	if (g_m[i].sock >= 0) close(g_m[i].sock);
+	memset(&g_m[i], 0, sizeof g_m[i]); g_m[i].sock = -1;
+	if (g_nm > 0) g_nm--;
 }
 
-/* Map a guest path to its vmount-relative form ("/mnt/usb/a/b" -> "/a/b",
- * the mount point itself -> "/"). Returns 1 iff the path is under the vmount. */
-static int ukfs_rel(const char *guest, char *out, size_t osz)
-{
-	if (!g_vmounted) return 0;
-	size_t ml = strlen(g_vmount);
-	if (strncmp(guest, g_vmount, ml) != 0) return 0;
-	char c = guest[ml];
-	if (c != '\0' && c != '/') return 0;            /* "/mnt/usb" vs "/mnt/usbX" */
-	snprintf(out, osz, "%s", guest[ml] ? guest + ml : "/");
-	return 1;
-}
-
-/* ukfsd is told to MOUNT lazily, on the first access under the vmount, NOT from
- * the mount(2) hook: on Android mount(2) is blocked by the parent seccomp and
- * handled via proot's SIGSYS path, and socket I/O from that context does not
- * deliver to ukfsd (the write is lost). The first path op under the mount point
- * (e.g. `ls`) runs on the normal syscall path, where socket I/O works.
- * (g_ukfs_ready is declared up top, next to g_vmounted.) */
+/* Send MOUNT for the active mount on its already-open connection. */
 static int ukfs_do_mount(void)
 {
-	ukfs_sdrop();   /* fresh connection for the mount */
-	int s = ukfs_conn();
-	if (s < 0) { uk_dbg_line("uk_fs: ukfs_conn FAILED (cannot reach io.neoterm.fs)\n"); return -1; }
-	{
-		/* NB: send the FULL command INCLUDING the trailing '\n' — ukfsd's
-		 * read_line() blocks until it sees the newline. Use strlen (not a
-		 * hard-coded length) so the byte count can never drift from the literal,
-		 * and uksd_wn so partial writes / EINTR are handled. */
-		static const char REQ[] = "MOUNT auto uksd0\n";
-		int wn = uksd_wn(s, REQ, sizeof REQ - 1);
-		if (wn < 0) {
-			char l[96]; snprintf(l, sizeof l, "uk_fs: MOUNT write failed errno=%d\n", errno);
-			uk_dbg_line(l); ukfs_sdrop(); return -1;
-		}
+	struct ukm *m = &g_m[g_am];
+	if (m->sock < 0) return -1;
+	/* NB: send the FULL command INCLUDING the trailing '\n' — ukfsd's read_line()
+	 * blocks until it sees the newline. */
+	char req[96]; int n = snprintf(req, sizeof req, "MOUNT auto %s\n", m->token);
+	if (uksd_wn(m->sock, req, n) < 0) {
+		char l[96]; snprintf(l, sizeof l, "uk_fs: MOUNT %s write failed errno=%d\n", m->token, errno);
+		uk_dbg_line(l); return -1;
 	}
 	char line[64];
-	if (uksd_rl(s, line, sizeof line) < 0) { uk_dbg_line("uk_fs: MOUNT no reply\n"); ukfs_sdrop(); return -1; }
-	if (line[0] == 'O' && line[1] == 'K') return 0;
-	{ char l[128]; snprintf(l, sizeof l, "uk_fs: MOUNT rejected: '%s'\n", line); uk_dbg_line(l); }
+	if (uksd_rl(m->sock, line, sizeof line) < 0) { uk_dbg_line("uk_fs: MOUNT no reply\n"); return -1; }
+	if (line[0] == 'O' && line[1] == 'K') { char l[80]; snprintf(l, sizeof l, "uk_fs: MOUNT %s OK\n", m->token); uk_dbg_line(l); return 0; }
+	{ char l[128]; snprintf(l, sizeof l, "uk_fs: MOUNT %s rejected: '%s'\n", m->token, line); uk_dbg_line(l); }
 	return -1;
 }
 
-/* Tell ukfsd to unmount and forget the vmount. Dropping the connection alone
- * already loses the ukfsd-side mount (one FS per connection), but send an
- * explicit UMOUNT first so ukfsd can flush/free before the close. */
-static void ukfs_do_umount(void)
+/* Connect to the active mount's ukfsd and ensure it has MOUNTed. Centralises
+ * connect + lazy MOUNT so every op just calls ukfs_conn() after g_am is set. The
+ * MOUNT is deferred to first access (not the mount(2) hook): on Android mount(2)
+ * is SIGSYS-blocked and socket I/O from that context wouldn't reach ukfsd. */
+static int ukfs_conn(void)
 {
-	if (g_ukfs_ready && g_ukfs_sock >= 0) {
-		char line[32];
-		if (uksd_wn(g_ukfs_sock, "UMOUNT\n", 7) >= 0)
-			uksd_rl(g_ukfs_sock, line, sizeof line);   /* best-effort reply */
+	if (g_am < 0 || g_am >= UK_MAXM || !g_m[g_am].used) return -1;
+	struct ukm *m = &g_m[g_am];
+	if (m->sock >= 0 && m->ready) return m->sock;
+	if (m->sock < 0) {
+		/* backing device gone? auto-free the slot so the mount point reverts to the
+		 * empty host dir instead of erroring forever (probed only when reconnecting). */
+		if (!ukfs_block_present()) { uk_dbg_line("uk_fs: device gone -> auto-umount\n"); ukfs_unmount_slot(g_am); g_am = -1; return -1; }
+		int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+		if (s < 0) return -1;
+		struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
+		setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+		setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+		struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
+		a.sun_path[0] = '\0'; strncpy(a.sun_path + 1, m->fsname, sizeof(a.sun_path) - 2);
+		socklen_t len = sizeof(a.sun_family) + 1 + strlen(m->fsname);
+		if (connect(s, (struct sockaddr *) &a, len) < 0) {
+			char l[96]; snprintf(l, sizeof l, "uk_fs: connect %s FAILED errno=%d\n", m->fsname, errno);
+			uk_dbg_line(l); close(s); return -1;
+		}
+		m->sock = s;
+		{ char l[80]; snprintf(l, sizeof l, "uk_fs: connected %s fd=%d (%s)\n", m->fsname, s, m->token); uk_dbg_line(l); }
 	}
-	ukfs_sdrop();          /* closes the connection -> ukfsd drops the FS */
-	g_vmounted = 0;
-	g_vmount[0] = '\0';
+	if (!m->ready) {
+		if (ukfs_do_mount() != 0) { ukfs_sdrop(); return -1; }
+		m->ready = 1;
+	}
+	return m->sock;
+}
+
+/* Map a guest path to the matching mount + its mount-relative form ("/mnt/usb/a"
+ * -> "/a", the mount point itself -> "/"). On a match sets g_am and returns 1;
+ * else returns 0. The longest matching vmount wins (nested mount points). */
+static int ukfs_rel(const char *guest, char *out, size_t osz)
+{
+	int best = -1; size_t bestlen = 0;
+	for (int i = 0; i < UK_MAXM; i++) {
+		if (!g_m[i].used) continue;
+		size_t ml = strlen(g_m[i].vmount);
+		if (strncmp(guest, g_m[i].vmount, ml) != 0) continue;
+		char c = guest[ml];
+		if (c != '\0' && c != '/') continue;            /* "/mnt/usb" vs "/mnt/usbX" */
+		if (ml >= bestlen) { bestlen = ml; best = i; }
+	}
+	if (best < 0) return 0;
+	g_am = best;
+	const char *rest = guest + bestlen;
+	snprintf(out, osz, "%s", rest[0] ? rest : "/");
+	return 1;
+}
+
+/* Register (or reuse) a mount slot for a guest mount of <src> at <tgt>. Sets g_am
+ * to the slot. Returns the slot index, or -1 (not our device / table full). */
+static int ukfs_mount_register(const char *src, const char *tgt)
+{
+	char token[64], fsname[64];
+	if (!ukfs_dev_token(src, token, sizeof token, fsname, sizeof fsname)) return -1;
+	int slot = -1;
+	for (int i = 0; i < UK_MAXM; i++) if (g_m[i].used && strcmp(g_m[i].vmount, tgt) == 0) { slot = i; break; }
+	if (slot < 0) { for (int i = 0; i < UK_MAXM; i++) if (!g_m[i].used) { slot = i; break; } if (slot >= 0) g_nm++; }
+	if (slot < 0) return -1;            /* table full */
+	memset(&g_m[slot], 0, sizeof g_m[slot]);
+	g_m[slot].used = 1; g_m[slot].sock = -1; g_m[slot].ready = 0;
+	snprintf(g_m[slot].vmount, sizeof g_m[slot].vmount, "%s", tgt);
+	snprintf(g_m[slot].token,  sizeof g_m[slot].token,  "%s", token);
+	snprintf(g_m[slot].fsname, sizeof g_m[slot].fsname, "%s", fsname);
+	g_am = slot;
+	return slot;
+}
+
+/* Free the mount slot whose vmount == tgt (real guest umount). Returns 1 if found. */
+static int ukfs_umount_target(const char *tgt)
+{
+	for (int i = 0; i < UK_MAXM; i++)
+		if (g_m[i].used && strcmp(g_m[i].vmount, tgt) == 0) { ukfs_unmount_slot(i); if (g_am == i) g_am = -1; return 1; }
+	return 0;
 }
 
 /* True iff the io.neoterm.block server still has a device attached (SIZE -> OK).
@@ -149,26 +215,13 @@ static int ukfs_block_present(void)
 	return n >= 2 && r[0] == 'O' && r[1] == 'K';
 }
 
-/* Perform the deferred ukfsd mount on first access (idempotent). A (re)mount is
- * needed whenever g_ukfs_ready is 0 — which also happens after a socket error
- * (ukfs_sdrop) when the pendrive is unplugged mid-session. At that point, if the
- * backing device is gone, auto-clear the vmount so the mount point reverts to the
- * empty host dir instead of erroring forever (the guest can't umount a device
- * that vanished). The block-present probe is only done when a mount is pending,
- * so it costs nothing on the steady-state mounted path. */
+/* The deferred ukfsd MOUNT is now handled inside ukfs_conn() for the active mount
+ * (connect + block-present probe + MOUNT, all lazy on first access). Kept as a thin
+ * wrapper for the active mount so existing callers stay valid. */
 static void ukfs_ensure_mounted(void)
 {
-	if (!g_vmounted || g_ukfs_ready)
-		return;
-	if (!ukfs_block_present()) {
-		uk_dbg_line("uk_fs: device gone -> auto-umount\n");
-		ukfs_do_umount();
-		return;
-	}
-	if (ukfs_do_mount() == 0) {
-		g_ukfs_ready = 1;
-		uk_dbg_line("uk_fs: lazy ukfsd mount OK\n");
-	}
+	if (g_am < 0) return;
+	(void) ukfs_conn();
 }
 
 /* STAT one path. Returns 0 (filled), -2 (ENOENT from ukfsd), -1 (socket error). */
@@ -399,6 +452,7 @@ static int ukfs_ppid(int tid)
 struct ukfs_dent { unsigned long long ino; int type; char name[256]; };
 struct ukfs_vfd {
 	int used, pid, fd, isdir, wrote;   /* wrote: needs a SYNC on close (deferred flush) */
+	int mnt;                        /* which mount slot (g_m[]) this fd belongs to */
 	int append;                     /* O_APPEND: each write goes to EOF (offset re-evaluated) */
 	int mmapw;                      /* has a PROT_WRITE|MAP_SHARED mapping -> flush placeholder back */
 	long long off;                  /* regular-file read cursor */
@@ -407,7 +461,7 @@ struct ukfs_vfd {
 	struct ukfs_dent *dents;        /* dir: parsed LIST incl. "." and ".." */
 	int dent_n, dent_idx;           /* count and emit cursor */
 };
-struct ukfs_pending { int used, pid, isdir, append; char path[PATH_MAX]; char backing[64]; };
+struct ukfs_pending { int used, pid, isdir, append, mnt; char path[PATH_MAX]; char backing[64]; };
 static struct ukfs_vfd     g_vfd[128];
 static struct ukfs_pending g_open_pending[64];
 static int                 g_ph_seq;   /* unique per-open placeholder id */
@@ -452,7 +506,7 @@ static struct ukfs_vfd *vfd_lookup(Tracee *tracee, int fd)
 {
 	int tg = ukfs_tgid(tracee->pid);
 	struct ukfs_vfd *v = vfd_find(tg, fd);
-	if (v) return v;
+	if (v) { g_am = v->mnt; return v; }       /* route subsequent ukfsd I/O to this fd's mount */
 	if (inh_mark(tg)) return NULL;            /* ancestry already resolved for this tgid */
 	int tid = tracee->pid;
 	for (int hop = 0; hop < 16; hop++) {       /* walk to the nearest ancestor with vfds */
@@ -476,7 +530,9 @@ static struct ukfs_vfd *vfd_lookup(Tracee *tracee, int fd)
 		}
 		tid = ppid;
 	}
-	return vfd_find(tg, fd);
+	v = vfd_find(tg, fd);
+	if (v) g_am = v->mnt;                      /* route to the (now-inherited) fd's mount */
+	return v;
 }
 
 /* Pending-result table: for path syscalls I PR_void at sysENTER (renameat,
@@ -515,6 +571,7 @@ static void open_pending_set(int pid, int isdir, int append, const char *path, c
 	if (i == 64) return;
 	g_open_pending[i].used = 1; g_open_pending[i].pid = pid; g_open_pending[i].isdir = isdir;
 	g_open_pending[i].append = append;
+	g_open_pending[i].mnt = g_am;   /* the open path was just resolved to this mount */
 	snprintf(g_open_pending[i].path, sizeof g_open_pending[i].path, "%s", path);
 	snprintf(g_open_pending[i].backing, sizeof g_open_pending[i].backing, "%s", backing ? backing : "");
 }
@@ -524,6 +581,7 @@ static void open_pending_set(int pid, int isdir, int append, const char *path, c
  * namelen, name[]} (little-endian), matching ukfsd's LIST reply. */
 static int ukfs_load_dir(struct ukfs_vfd *v)
 {
+	g_am = v->mnt;                             /* route to this dir's mount */
 	int s = ukfs_conn(); if (s < 0) return -1;
 	char req[PATH_MAX + 16];
 	int rl = snprintf(req, sizeof req, "LIST %s\n", v->path);
@@ -632,12 +690,11 @@ static bool uknl_fs_mount_hook(Tracee *tracee)
 	if (!ukfs_src_is_dev(src)) return false;
 	char tgt[PATH_MAX];
 	if (get_sysarg_path(tracee, tgt, SYSARG_2) < 0) return false;
-	/* Register the vmount only — no socket I/O here (this may run in the SIGSYS
+	/* Register the vmount slot only — no socket I/O here (this may run in the SIGSYS
 	 * context where it wouldn't deliver). The ukfsd MOUNT happens lazily on the
-	 * first access under the mount point. */
-	snprintf(g_vmount, sizeof g_vmount, "%s", tgt);
-	g_vmounted = 1;
-	g_ukfs_ready = 0;
+	 * first access under the mount point. The src device token (uksd0 / uksd0pN)
+	 * selects which partition + which ukfsd this mount talks to. */
+	if (ukfs_mount_register(src, tgt) < 0) return false;
 	char l[PATH_MAX + 96];
 	snprintf(l, sizeof l, "uk_fs: MOUNT hook src='%s' tgt='%s' (deferred)\n", src, tgt);
 	uk_dbg(tracee, l);
@@ -649,15 +706,13 @@ static bool uknl_fs_mount_hook(Tracee *tracee)
  * our vmount point (the caller then reports success to the guest). */
 static bool uknl_fs_umount_hook(Tracee *tracee)
 {
-	if (!uk_fs_on() || !g_vmounted) return false;
+	if (!uk_fs_on() || g_nm == 0) return false;
 	char tgt[PATH_MAX];
 	if (get_sysarg_path(tracee, tgt, SYSARG_1) < 0) return false;
-	if (strcmp(tgt, g_vmount) != 0) return false;   /* not our mount point */
 	char l[PATH_MAX + 64];
 	snprintf(l, sizeof l, "uk_fs: UMOUNT hook tgt='%s'\n", tgt);
 	uk_dbg(tracee, l);
-	ukfs_do_umount();
-	return true;
+	return ukfs_umount_target(tgt) ? true : false;   /* not our mount point -> let proot handle */
 }
 
 #ifndef AT_FDCWD
@@ -681,6 +736,7 @@ static int ukfs_rel_at(Tracee *tracee, int dirfd, const char *path, char *rel, s
 	}
 	struct ukfs_vfd *v = vfd_lookup(tracee, dirfd);
 	if (!v) return 0;                       /* dirfd isn't one of our mount fds */
+	g_am = v->mnt;                          /* the dirfd's mount selects the target's mount */
 	if (!path[0])
 		snprintf(rel, rsz, "%s", v->path);              /* empty path => the dir itself */
 	else if (v->path[0] == '/' && v->path[1] == '\0')
@@ -834,7 +890,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (!uk_dbg_init) {
 		uk_dbg_init = 1;
 		char l[256];
-		snprintf(l, sizeof l, "uk_fs: INIT v46-mmap-writeback UK_FS='%s' UK_BLOCK='%s'\n",
+		snprintf(l, sizeof l, "uk_fs: INIT v47-multipart UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
 		uk_dbg(tracee, l);
@@ -863,8 +919,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		word_t ta = peek_reg(tracee, CURRENT, SYSARG_2);
 		char tgt[PATH_MAX];
 		if (!ta || read_string(tracee, tgt, ta, sizeof tgt) <= 0) return false;
-		snprintf(g_vmount, sizeof g_vmount, "%s", tgt);
-		g_vmounted = 1; g_ukfs_ready = 0;
+		if (ukfs_mount_register(src, tgt) < 0) return false;
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		return true;
@@ -873,19 +928,19 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	/* umount(2)/umount2(2) on the NORMAL path (non-Android). On Android these are
 	 * SIGSYS-blocked and handled via the apply_emulated_umount hook instead. */
 	if (nr == PR_umount2) {
-		if (!g_vmounted) return false;
+		if (g_nm == 0) return false;
 		word_t ta = peek_reg(tracee, CURRENT, SYSARG_1);
 		char tgt[PATH_MAX];
 		if (!ta || read_string(tracee, tgt, ta, sizeof tgt) <= 0) return false;
-		if (strcmp(tgt, g_vmount) != 0) return false;
-		ukfs_do_umount();
+		if (!ukfs_umount_target(tgt)) return false;
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		return true;
 	}
 
-	if (!g_vmounted) return false;
-	ukfs_ensure_mounted();   /* perform the deferred ukfsd MOUNT on first access */
+	if (g_nm == 0) return false;
+	/* MOUNT is now ensured per-op inside ukfs_conn() once g_am is resolved by the
+	 * path; no global ensure here (we don't yet know which mount this op targets). */
 
 	/* execve/execveat of a program stored ON the vmount. The kernel would read the
 	 * (empty) placeholder and fail with ENOEXEC ("not found"). Materialise the ukfs
@@ -952,9 +1007,11 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (nr == PR_fchdir) {
 		struct ukfs_vfd *v = vfd_lookup(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1));
 		if (!v || !v->isdir) return false;
+		g_am = v->mnt;                                  /* this fd's mount selects the vmount prefix */
+		const char *vm = (g_am >= 0 && g_am < UK_MAXM) ? g_m[g_am].vmount : "";
 		char canon[PATH_MAX];
-		if (v->path[0] == '/' && v->path[1] == '\0') snprintf(canon, sizeof canon, "%s", g_vmount);
-		else snprintf(canon, sizeof canon, "%s%s", g_vmount, v->path);
+		if (v->path[0] == '/' && v->path[1] == '\0') snprintf(canon, sizeof canon, "%s", vm);
+		else snprintf(canon, sizeof canon, "%s%s", vm, v->path);
 		char *tmp = talloc_strdup(tracee->fs, canon);
 		if (tmp) { TALLOC_FREE(tracee->fs->cwd); tracee->fs->cwd = tmp; talloc_set_name_const(tracee->fs->cwd, "$cwd"); }
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
@@ -996,7 +1053,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 	if (nr == PR_msync) {
 		int tg = ukfs_tgid(tracee->pid), any = 0;
 		for (int i = 0; i < 128; i++)
-			if (g_vfd[i].used && g_vfd[i].pid == tg && g_vfd[i].mmapw) { ukfs_flush_mmap(tracee, &g_vfd[i], g_vfd[i].fd); any = 1; }
+			if (g_vfd[i].used && g_vfd[i].pid == tg && g_vfd[i].mmapw) { g_am = g_vfd[i].mnt; ukfs_flush_mmap(tracee, &g_vfd[i], g_vfd[i].fd); any = 1; }
 		if (!any) return false;          /* nothing of ours mapped: let the native msync run */
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
@@ -1626,7 +1683,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 void uknl_fs_exit_final(Tracee *tracee, word_t nr);
 void uknl_fs_exit_final(Tracee *tracee, word_t nr)
 {
-	if (!uk_fs_on() || !g_vmounted) return;
+	if (!uk_fs_on() || g_nm == 0) return;
 	long want;
 	if (pend_res_take(tracee->pid, nr, &want)) {
 		int cur = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
@@ -1653,7 +1710,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 	 * returned by the FS engine. Log every syscall that EXITS with exactly -EPERM
 	 * (-1) while a vmount is active — that's the culprit, by number. EPERM is rare,
 	 * so this is near-silent; the decoder maps the number to a name. */
-	if (g_vmounted) {
+	if (g_nm > 0) {
 		int res = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);   /* 32-bit, like fake_id0 */
 		if (res == -1 || res == -13) {       /* -EPERM / -EACCES */
 			/* Print BOTH path candidates verbatim (no vmount filter): the EACCES
@@ -1699,7 +1756,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 		if (v) {
 			memset(v, 0, sizeof *v);
 			v->used = 1; v->pid = pid; v->fd = (int) newfd;
-			v->isdir = src->isdir; v->off = src->off; v->append = src->append;
+			v->isdir = src->isdir; v->off = src->off; v->append = src->append; v->mnt = src->mnt;
 			snprintf(v->path, sizeof v->path, "%s", src->path);
 		}
 		return;
@@ -1725,7 +1782,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 		if (v) {
 			memset(v, 0, sizeof *v);
 			v->used = 1; v->pid = pid; v->fd = (int) newfd;
-			v->isdir = src->isdir; v->off = src->off; v->append = src->append;
+			v->isdir = src->isdir; v->off = src->off; v->append = src->append; v->mnt = src->mnt;
 			snprintf(v->path, sizeof v->path, "%s", src->path);
 		}
 		return;
@@ -1744,7 +1801,7 @@ void uknl_fs_open_exit(Tracee *tracee, word_t nr)
 		if (v) {
 			memset(v, 0, sizeof *v);
 			v->used = 1; v->pid = pid; v->fd = (int) fd; v->isdir = pp->isdir; v->off = 0;
-			v->append = pp->append;
+			v->append = pp->append; v->mnt = pp->mnt;
 			snprintf(v->path, sizeof v->path, "%s", pp->path);
 			snprintf(v->backing, sizeof v->backing, "%s", pp->backing);
 			if (pp->isdir) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: vfd+DIR fd=%ld path='%s' tgid=%d\n", fd, pp->path, pid); uk_dbg_line(l); }

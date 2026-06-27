@@ -217,9 +217,20 @@ object ProotManager {
     // seekable, ls-able node; the proot block proxy (enter.c, UK_BLOCK) overrides its
     // I/O with SCSI to the app-side BlockBridge. Only when the toggle is on.
     if (NeoPreference.isUsbStorageEnabled()) {
-      val uksd = File("${NeoTermPath.PROOT_ROOT_PATH}/sysdata").apply { mkdirs() }.let { File(it, "uksd0") }
+      val sysdata = File("${NeoTermPath.PROOT_ROOT_PATH}/sysdata").apply { mkdirs() }
+      val uksd = File(sysdata, "uksd0")
       if (!uksd.exists()) runCatching { uksd.writeText("") }
       bind(args, uksd.absolutePath, "/dev/uksd0")
+      // Partition nodes /dev/uksd0p1..p4: a multi-partition device (Raspberry Pi
+      // card: FAT boot + ext4 root) is mounted per-partition. The redirect routes
+      // a mount of /dev/uksd0pN to ukfsd on io.neoterm.fs.pN (one daemon each, see
+      // FsBridge). Bind empty markers so the guest `mount /dev/uksd0pN` resolves;
+      // probing a non-existent partition simply yields a failed mount.
+      for (n in 1..4) {
+        val part = File(sysdata, "uksd0p$n")
+        if (!part.exists()) runCatching { part.writeText("") }
+        bind(args, part.absolutePath, "/dev/uksd0p$n")
+      }
     }
 
     // USB-serial: /dev/ttyUSB* are VIRTUAL hotplug ports, not static binds — the

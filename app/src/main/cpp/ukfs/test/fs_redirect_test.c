@@ -99,8 +99,9 @@ int main(void)
     g_resp_blen = o; g_resp_bpos = 0;
     snprintf(g_resp_line, sizeof g_resp_line, "OK 2 %zu", o);
 
-    g_ukfs_sock = 3;   /* bypass the real connect(); uksd_* are scripted */
-    struct ukfs_vfd v; memset(&v, 0, sizeof v); v.used = 1; v.isdir = 1; strcpy(v.path, "/");
+    /* set up a single ready mount slot (bypass the real connect(); uksd_* are scripted) */
+    g_m[0].used = 1; g_m[0].sock = 3; g_m[0].ready = 1; g_nm = 1; g_am = 0;
+    struct ukfs_vfd v; memset(&v, 0, sizeof v); v.used = 1; v.isdir = 1; v.mnt = 0; strcpy(v.path, "/");
 
     if (ukfs_load_dir(&v) != 0) { printf("  FAIL  ukfs_load_dir\n"); return 1; }
     /* expect 4 entries: "." ".." HELLO.TXT SUBDIR */
