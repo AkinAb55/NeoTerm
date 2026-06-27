@@ -70,6 +70,10 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* config-only mode: mp == "-" just sets up the loop (so the caller can mkfs
+	 * /dev/loopNpM, fdisk it, etc.) and prints the chosen loop number. */
+	if (mp[0] == '-' && mp[1] == '\0') { printf("  LOOPN=%d\n", n); return 0; }
+
 	char src[80];
 	if (part > 0) snprintf(src, sizeof src, "/dev/loop%dp%d", n, part);
 	else          snprintf(src, sizeof src, "/dev/loop%d", n);

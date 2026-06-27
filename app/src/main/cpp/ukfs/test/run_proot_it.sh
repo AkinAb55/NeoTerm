@@ -387,6 +387,19 @@ SZ=\$(df -k "$MPE" 2>/dev/null | awk 'NR==2{print \$2}')
 # FAT boot partition via whole-loop at offset (mount -o loop,offset= style)
 "$W/loopmnt" "$W/pi.img" "$MPF" 0 $FATOFF || fail "loop mount @offset (vfat)"
 ls "$MPF" | grep -qi cmdline || fail "fat loop content (\$(ls "$MPF"))"
+# mkfs ON a loop partition node (the losetup -fP + mkfs /dev/loopNp1 flow): build a
+# fresh empty partitioned image, set up the loop, then mkfs the partition node and
+# mount it — needs BLKGETSIZE64 on the loop node to report the partition size.
+dd if=/dev/zero of="$W/mk.img" bs=1M count=48 status=none
+printf 'label: dos\nstart=2048, type=83\n' | sfdisk "$W/mk.img" >/dev/null 2>&1
+LN=\$("$W/loopmnt" "$W/mk.img" - 1 | sed -n 's/.*LOOPN=//p')
+echo "  mkfs target loop=\$LN"
+[ -n "\$LN" ] || fail "loopmnt config-only"
+mkfs.ext4 -q -F "/dev/loop\${LN}p1" 2>/dev/null || fail "mkfs.ext4 on /dev/loop\${LN}p1"
+mkdir -p "$W/lmpm"
+mount "/dev/loop\${LN}p1" "$W/lmpm" || fail "mount freshly-mkfs'd loop partition"
+echo mkfsloop > "$W/lmpm/t" && [ "\$(cat "$W/lmpm/t")" = mkfsloop ] || fail "rw on mkfs'd loop part"
+umount "$W/lmpm"
 echo "GUEST_RESULT=\$R"
 EOF
   out="$(UK_FS=1 UK_BLOCK=1 "$W/prsrc/proot" -0 $LB /bin/sh "$W/guest_loop.sh" 2>&1)"

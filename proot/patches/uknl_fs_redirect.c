@@ -498,13 +498,24 @@ static bool ukfs_loopfd_op(Tracee *tracee, word_t nr)
 {
 	if (!g_lo_any) return false;
 	if (nr != PR_read && nr != PR_pread64 && nr != PR_write && nr != PR_pwrite64 &&
-	    nr != PR_lseek && nr != PR_close) return false;
+	    nr != PR_lseek && nr != PR_close && nr != PR_ioctl) return false;
 	int pid = ukfs_tgid(tracee->pid);
 	int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
 	struct uklofd *e = uklofd_find(pid, fd);
 	if (!e) return false;
 	long long avail = e->size;   /* sizelimit; 0 = to end of image */
 	if (nr == PR_close) { close(e->hostfd); e->used = 0; return false; }  /* free, but let real close run */
+	if (nr == PR_ioctl) {
+		/* a loop node is a BLOCK device: mkfs/fdisk/blkid query its geometry via
+		 * BLK* ioctls (not fstat). Answer from the loop range. */
+		unsigned long cmd = (unsigned long) peek_reg(tracee, CURRENT, SYSARG_2);
+		word_t arg = peek_reg(tracee, CURRENT, SYSARG_3);
+		if (cmd == 0x80081272UL) { unsigned long long v = (unsigned long long) avail; write_data(tracee, arg, &v, 8); poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true; } /* BLKGETSIZE64 */
+		if (cmd == 0x1260UL)     { unsigned long v = (unsigned long)(avail / 512); write_data(tracee, arg, &v, sizeof v); poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true; } /* BLKGETSIZE */
+		if (cmd == 0x1268UL || cmd == 0x127BUL) { int v = 512; write_data(tracee, arg, &v, sizeof v); poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true; } /* BLKSSZGET / BLKPBSZGET */
+		if (cmd == 0x125FUL || cmd == 0x1261UL || cmd == 0x127CUL) { poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true; } /* BLKRRPART / BLKFLSBUF / BLKDISCARD-no-op */
+		return false;   /* other ioctls: let them run natively */
+	}
 	if (nr == PR_lseek) {
 		long long off = (long long)(off_t) peek_reg(tracee, CURRENT, SYSARG_2);
 		int whence = (int) peek_reg(tracee, CURRENT, SYSARG_3);
