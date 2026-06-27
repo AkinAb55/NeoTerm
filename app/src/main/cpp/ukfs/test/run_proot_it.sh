@@ -34,6 +34,7 @@ ok(){ echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad(){ echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 have(){ command -v "$1" >/dev/null 2>&1; }
 die_skip(){ echo "== proot integration test SKIPPED: $1 =="; exit 0; }
+skip(){ echo "  SKIP  $1 ($2)"; }
 
 echo "== USB-storage FS — proot integration test =="
 for t in gcc make python3 mkfs.vfat mcopy xxd ar; do have "$t" || die_skip "missing tool: $t"; done
@@ -107,12 +108,17 @@ printf '#ifndef _STUB_ASHMEM_H\n#define _STUB_ASHMEM_H\n#include <linux/ioctl.h>
 ok "build host proot (patched)"
 
 # ── 3. host ukfsd ─────────────────────────────────────────────────────────────
-KCF="-O2 -fno-strict-aliasing -fno-builtin -fshort-wchar -D_GNU_SOURCE -D__KERNEL__ -DMODULE -w -Wno-implicit-function-declaration -I $UKFS/include -I $UKFS/linux/fs/fat"
+KCF="-O2 -fno-strict-aliasing -fno-builtin -fshort-wchar -D_GNU_SOURCE -D__KERNEL__ -DMODULE -w -Wno-implicit-function-declaration -I $UKFS/include -I $UKFS/linux/fs/fat -I $UKFS/linux/fs/exfat"
 FATDEF='-DCONFIG_VFAT_FS=1 -DCONFIG_FAT_FS=1 -DCONFIG_FAT_DEFAULT_CODEPAGE=437 -DCONFIG_FAT_DEFAULT_IOCHARSET="iso8859-1" -DCONFIG_FAT_DEFAULT_UTF8=0'
+EXDEF='-DCONFIG_EXFAT_FS=1 -DCONFIG_EXFAT_DEFAULT_IOCHARSET="utf8"'
 mkdir -p "$W/uk"; OBJ=""
 for c in cache dir fatent file inode misc nfs namei_vfat; do
-  gcc -c $KCF $FATDEF -DKBUILD_MODNAME="\"v_$c\"" "$UKFS/linux/fs/fat/$c.c" -o "$W/uk/$c.o" 2>/dev/null || { bad "ukfsd build ($c)"; exit 1; }
-  OBJ="$OBJ $W/uk/$c.o"
+  gcc -c $KCF $FATDEF -DKBUILD_MODNAME="\"v_$c\"" "$UKFS/linux/fs/fat/$c.c" -o "$W/uk/fat_$c.o" 2>/dev/null || { bad "ukfsd build ($c)"; exit 1; }
+  OBJ="$OBJ $W/uk/fat_$c.o"
+done
+for c in balloc cache dir fatent file inode misc namei nls super; do
+  gcc -c $KCF $EXDEF -DKBUILD_MODNAME="\"ex_$c\"" "$UKFS/linux/fs/exfat/$c.c" -o "$W/uk/ex_$c.o" 2>/dev/null || { bad "ukfsd build (exfat/$c)"; exit 1; }
+  OBJ="$OBJ $W/uk/ex_$c.o"
 done
 for f in vfs:shim/fs/vfs.c blocksock:shim/fs/block_sock.c posix_acl:shim/fs/posix_acl.c compat:shim/compat_bionic.c; do
   b="${f%%:*}"; s="${f##*:}"; gcc -c $KCF $FATDEF "$UKFS/$s" -o "$W/uk/$b.o" 2>/dev/null || { bad "ukfsd build ($s)"; exit 1; }
@@ -173,14 +179,12 @@ while True:
     threading.Thread(target=handle,args=(cc,),daemon=True).start()
 PY
 
-# unique abstract socket names so parallel runs / a real device don't collide
-R="$$_$RANDOM"; BSOCK="io.neoterm.block"; FSOCK="io.neoterm.fs"
 # NOTE: the redirect hard-codes io.neoterm.{fs,block}; ensure none are in use.
-python3 "$W/blk.py" "$BSOCK" "$W/fat.img" >"$W/blk.log" 2>&1 & PIDS="$PIDS $!"
-UKFSD_BLOCKSOCK="$BSOCK" "$W/ukfsd" "$FSOCK" >"$W/ukfsd.log" 2>&1 & PIDS="$PIDS $!"
-sleep 0.5
+BSOCK="io.neoterm.block"; FSOCK="io.neoterm.fs"
 
-# helper that issues the mount(2) the redirect intercepts (source must end /uksd0)
+# helper that issues the mount(2) the redirect intercepts (source must end /uksd0).
+# The mount fstype is irrelevant (the redirect always sends "MOUNT auto", and ukfsd
+# probes vfat/exfat/ntfs3/ext4) — so the same helper drives every filesystem.
 cat > "$W/mnt.c" <<'C'
 #include <sys/mount.h>
 #include <stdio.h>
@@ -188,42 +192,61 @@ int main(int c,char**v){ if(c<2) return 2; if(mount("/dev/uksd0",v[1],"vfat",0,"
 C
 gcc -O2 -o "$W/mnt" "$W/mnt.c" 2>/dev/null || { bad "build mnt helper"; exit 1; }
 
-MP="$W/mp"; rm -rf "$MP"; mkdir -p "$MP"
+MP="$W/mp"
+# FS-agnostic guest battery: creates its own seed (so it works on exfat too, where
+# mtools can't pre-seed), then exercises the real command paths and verifies the
+# seed survives the recursive rm of the test tree.
 cat > "$W/guest.sh" <<EOF
 set +e
 R=0
 fail(){ echo "  GUESTFAIL: \$1"; R=1; }
 $W/mnt "$MP" || { echo "  GUESTFAIL: mount"; exit 1; }
-# nested mkdir -p (legacy mkdir + chdir), write, read-back
+echo seeddata > "$MP/SEED.TXT" || fail "seed write"
 mkdir -p "$MP/a/b/c" || fail "mkdir -p"
 echo hello > "$MP/a/b/c/f.txt" || fail "write"
 [ "\$(cat "$MP/a/b/c/f.txt")" = hello ] || fail "read-back"
-# listing reflects the new tree
 ls "$MP" | grep -q '^a\$' || fail "ls top"
 ls "$MP/a/b/c" | grep -q '^f.txt\$' || fail "ls nested"
-# O_APPEND to an existing file: the append must land at EOF (not offset 0), and a
-# fresh read must see the grown content (buffer-cache write-through coherence). This
-# is exactly git's .git/config lock+append rewrite pattern.
+# O_APPEND must land at EOF; fresh read must see grown content (git config pattern)
 printf 'L1\n' > "$MP/a/ap.txt" || fail "append-create"
 printf 'L2\n' >> "$MP/a/ap.txt" || fail "append-write"
 [ "\$(cat "$MP/a/ap.txt" | tr '\\n' ,)" = "L1,L2," ] || fail "append-readback(\$(cat "$MP/a/ap.txt" | tr '\\n' ,))"
 [ "\$(wc -c < "$MP/a/ap.txt")" -eq 6 ] || fail "append-size"
-# rename, then rm -rf the whole tree (fdopendir + fcntl-dup + recursion)
 mv "$MP/a/b/c/f.txt" "$MP/a/b/c/g.txt" || fail "mv"
 [ "\$(cat "$MP/a/b/c/g.txt")" = hello ] || fail "read after mv"
 rm -rf "$MP/a" || fail "rm -rf"
 [ -e "$MP/a" ] && fail "rm -rf left tree" || true
-# seed still present, tree gone
-ls "$MP" | grep -q SEED.TXT || fail "seed gone"
+[ "\$(cat "$MP/SEED.TXT")" = seeddata ] || fail "seed lost"
 ls "$MP" | grep -q '^a\$' && fail "a still listed" || true
 echo "GUEST_RESULT=\$R"
 EOF
-GOUT="$(UK_FS=1 UK_BLOCK=1 "$W/prsrc/proot" -0 /bin/sh "$W/guest.sh" 2>&1)"
-echo "$GOUT" | sed 's/^/    /'
-if echo "$GOUT" | grep -q "GUEST_RESULT=0"; then
-  ok "proot e2e: mount + mkdir -p + write/read + mv + rm -rf (recursive)"
+
+# run the guest battery against one image (fresh servers each time, since the
+# redirect's sockets are fixed and only one mount can be live at once)
+run_e2e() {
+  local label="$1" img="$2"
+  for p in $PIDS; do kill "$p" 2>/dev/null; done; PIDS=""
+  sleep 0.3
+  python3 "$W/blk.py" "$BSOCK" "$img" >"$W/blk.log" 2>&1 & PIDS="$PIDS $!"
+  UKFSD_BLOCKSOCK="$BSOCK" "$W/ukfsd" "$FSOCK" >"$W/ukfsd_$label.log" 2>&1 & PIDS="$PIDS $!"
+  sleep 0.5
+  rm -rf "$MP"; mkdir -p "$MP"
+  local out; out="$(UK_FS=1 UK_BLOCK=1 "$W/prsrc/proot" -0 /bin/sh "$W/guest.sh" 2>&1)"
+  echo "$out" | sed "s/^/    [$label] /"
+  if echo "$out" | grep -q "GUEST_RESULT=0"; then
+    ok "proot e2e [$label]: mkdir -p + write/read + append + mv + rm -rf"
+  else
+    bad "proot e2e [$label]: real-command run"
+  fi
+}
+
+run_e2e vfat "$W/fat.img"
+if have mkfs.exfat; then
+  dd if=/dev/zero of="$W/exfat.img" bs=1M count=64 status=none
+  mkfs.exfat "$W/exfat.img" >/dev/null 2>&1
+  run_e2e exfat "$W/exfat.img"
 else
-  bad "proot e2e: real-command run"
+  skip "proot e2e [exfat]" "mkfs.exfat not installed"
 fi
 
 echo

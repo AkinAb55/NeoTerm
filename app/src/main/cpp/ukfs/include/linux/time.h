@@ -4,6 +4,12 @@
  * real header and add only uKernel's kernel-internal extras. */
 #ifndef _UK_LINUX_TIME_H
 #define _UK_LINUX_TIME_H
+/* __BIONIC__ is defined by <sys/cdefs.h>, not the compiler — pull it first so the
+ * branch below is correct even when <linux/time.h> is the very first include in a
+ * translation unit (e.g. exfat/misc.c), before any libc header has run. Without it,
+ * bionic builds wrongly took the glibc path and hit an incomplete 'struct timeval'
+ * in bionic's <sys/time.h>. Harmless on glibc. */
+#include <sys/cdefs.h>
 #if defined(__BIONIC__)
 #include_next <linux/time.h>          /* struct timeval/timespec/timezone, CLOCK_* */
 #include <time.h>                     /* libc struct tm (gmtime_r target in vfs.c) */

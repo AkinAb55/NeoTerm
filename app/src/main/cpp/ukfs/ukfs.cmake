@@ -48,6 +48,19 @@ foreach(c ${UKFS_FAT_SRC})
     COMPILE_DEFINITIONS "KBUILD_MODNAME=\"vfat_${c}\"")
 endforeach()
 
+# --- exfat driver: the full driver (its own super.c registers exfat_fs_type).
+#     FS-agnostic shim (vfs.c) + the same VFS bridge serve it; the MOUNT
+#     auto-probe in ukfsd tries vfat then exfat then ntfs3/ext4. ---
+set(UKFS_EXFAT_SRC balloc cache dir fatent file inode misc namei nls super)
+set(UKFS_EXFAT_DEFS -DCONFIG_EXFAT_FS=1 -DCONFIG_EXFAT_DEFAULT_IOCHARSET="utf8")
+foreach(c ${UKFS_EXFAT_SRC})
+  list(APPEND UKFS_OBJ_SRCS ${UKFS_DIR}/linux/fs/exfat/${c}.c)
+  # exfat needs its CONFIG_* (per-source, since the engine target carries the
+  # vfat defs) plus a unique KBUILD_MODNAME per file.
+  set_source_files_properties(${UKFS_DIR}/linux/fs/exfat/${c}.c PROPERTIES
+    COMPILE_DEFINITIONS "KBUILD_MODNAME=\"exfat_${c}\";CONFIG_EXFAT_FS=1;CONFIG_EXFAT_DEFAULT_IOCHARSET=\"utf8\"")
+endforeach()
+
 # --- shared FS engine: the vfat driver + VFS/ACL shim + kernel-API shim,
 #     compiled once and linked into both the test harness and the ukfsd server. ---
 add_library(ukfs_engine OBJECT
@@ -57,7 +70,7 @@ add_library(ukfs_engine OBJECT
   ${UKFS_DIR}/shim/compat_bionic.c   # backtrace/hex/system_wq/get_random_u32 shims
   ${UKFS_OBJ_SRCS}
   ${UKFS_SHIM_CORE})
-target_include_directories(ukfs_engine PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat)
+target_include_directories(ukfs_engine PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat ${UKFS_DIR}/linux/fs/exfat)
 target_compile_options(ukfs_engine PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 
 # --- ukfsd: io.neoterm.fs unix-socket server (the Android FS daemon) ---
@@ -66,12 +79,12 @@ target_compile_options(ukfs_engine PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 # the same deployment trick as libproot.so. FsBridge.kt launches it from there.
 add_executable(ukfsd ${UKFS_DIR}/shim/fs/ukfsd.c $<TARGET_OBJECTS:ukfs_engine>)
 set_target_properties(ukfsd PROPERTIES PREFIX "lib" OUTPUT_NAME "ukfsd" SUFFIX ".so")
-target_include_directories(ukfsd PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat)
+target_include_directories(ukfsd PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat ${UKFS_DIR}/linux/fs/exfat)
 target_compile_options(ukfsd PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 target_link_libraries(ukfsd dl)
 
 # --- ukfs_test_vfat: standalone mount/list/read/write harness (dev/debug) ---
 add_executable(ukfs_test_vfat ${UKFS_DIR}/shim/fs/ukfs_test.c $<TARGET_OBJECTS:ukfs_engine>)
-target_include_directories(ukfs_test_vfat PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat)
+target_include_directories(ukfs_test_vfat PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat ${UKFS_DIR}/linux/fs/exfat)
 target_compile_options(ukfs_test_vfat PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 target_link_libraries(ukfs_test_vfat dl)

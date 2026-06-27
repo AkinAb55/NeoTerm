@@ -29,15 +29,20 @@ bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 skip() { echo "  SKIP  $1 ($2)"; SKIP=$((SKIP+1)); }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-KCF="-O2 -fno-strict-aliasing -fno-builtin -fshort-wchar -D_GNU_SOURCE -D__KERNEL__ -DMODULE -w -Wno-implicit-function-declaration -I $UKFS/include -I $UKFS/linux/fs/fat"
+KCF="-O2 -fno-strict-aliasing -fno-builtin -fshort-wchar -D_GNU_SOURCE -D__KERNEL__ -DMODULE -w -Wno-implicit-function-declaration -I $UKFS/include -I $UKFS/linux/fs/fat -I $UKFS/linux/fs/exfat"
 FATDEF='-DCONFIG_VFAT_FS=1 -DCONFIG_FAT_FS=1 -DCONFIG_FAT_DEFAULT_CODEPAGE=437 -DCONFIG_FAT_DEFAULT_IOCHARSET="iso8859-1" -DCONFIG_FAT_DEFAULT_UTF8=0'
+EXDEF='-DCONFIG_EXFAT_FS=1 -DCONFIG_EXFAT_DEFAULT_IOCHARSET="utf8"'
 
 # ── build the engine + ukfsd + test harness for the host ──────────────────────
 build_host() {
   local cc="$1" out="$2"; shift 2; local extra="$*"; local obj=""
   for c in cache dir fatent file inode misc nfs namei_vfat; do
-    $cc -c $KCF $FATDEF $extra -DKBUILD_MODNAME="\"v_$c\"" "$UKFS/linux/fs/fat/$c.c" -o "$out/$c.o" 2>"$out/e_$c" || return 1
-    obj="$obj $out/$c.o"
+    $cc -c $KCF $FATDEF $extra -DKBUILD_MODNAME="\"v_$c\"" "$UKFS/linux/fs/fat/$c.c" -o "$out/fat_$c.o" 2>"$out/e_$c" || return 1
+    obj="$obj $out/fat_$c.o"
+  done
+  for c in balloc cache dir fatent file inode misc namei nls super; do
+    $cc -c $KCF $EXDEF $extra -DKBUILD_MODNAME="\"ex_$c\"" "$UKFS/linux/fs/exfat/$c.c" -o "$out/ex_$c.o" 2>"$out/ee_$c" || { echo "  (build) exfat/$c failed:"; grep -m3 error: "$out/ee_$c"; return 1; }
+    obj="$obj $out/ex_$c.o"
   done
   for f in vfs:shim/fs/vfs.c blocksock:shim/fs/block_sock.c posix_acl:shim/fs/posix_acl.c compat:shim/compat_bionic.c; do
     local b="${f%%:*}" src="${f##*:}"
@@ -94,6 +99,18 @@ if [ -x "$WORK/ukfs_test_vfat" ] && [ -n "$IMG" ]; then
   else bad "vfat engine: write"; fi
 else
   skip "vfat engine direct test" "no ukfs_test_vfat or mkfs.vfat/mtools"
+fi
+
+# ── 1b. exfat engine: mount + write + read on a fresh image (mtools is FAT-only,
+#        so use the harness' rw mode rather than a pre-seeded file) ─────────────
+if [ -x "$WORK/ukfs_test_vfat" ] && have mkfs.exfat; then
+  dd if=/dev/zero of="$WORK/ex.img" bs=1M count=48 status=none 2>/dev/null
+  mkfs.exfat "$WORK/ex.img" >/dev/null 2>&1
+  if "$WORK/ukfs_test_vfat" exfat "$WORK/ex.img" rw 2>/dev/null | grep -q "ukfs_write_file = 20"; then
+    ok "exfat engine: mount + write + read-back"
+  else bad "exfat engine: write/read"; fi
+else
+  skip "exfat engine direct test" "no ukfs_test_vfat or mkfs.exfat"
 fi
 
 # ── 2. ukfsd + io.neoterm.fs/block end-to-end ─────────────────────────────────
