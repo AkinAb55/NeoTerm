@@ -52,7 +52,23 @@ struct fused {
 	struct fnode *nodes;
 	size_t        nnodes, capnodes;
 	unsigned char *msg;       /* reusable I/O buffer (FUSED_MSGCAP) */
+	void (*wait_readable)(int fd, void *ctx);   /* pump-the-loop hook (proot), or NULL */
+	void  *wait_ctx;
 };
+
+void fused_set_wait(fused_t *f, void (*wait_readable)(int fd, void *ctx), void *ctx)
+{
+	if (!f) return;
+	f->wait_readable = wait_readable;
+	f->wait_ctx = ctx;
+}
+
+/* Block until the channel has a reply, pumping the proot event loop if a hook is
+ * set so the (ptraced) daemon can actually run and produce it. */
+static void chan_wait(fused_t *f)
+{
+	if (f->wait_readable) f->wait_readable(f->fd, f->wait_ctx);
+}
 
 /* ---- low-level request/reply ---- */
 
@@ -87,6 +103,7 @@ static int xfer(fused_t *f, uint32_t opcode, uint64_t nodeid,
 		break;
 	}
 
+	chan_wait(f);
 	ssize_t r;
 	for (;;) {
 		r = read(f->fd, f->msg, FUSED_MSGCAP);
@@ -160,6 +177,7 @@ static int xfer_ref(fused_t *f, uint32_t opcode, uint64_t nodeid,
 		if ((size_t) w != total) return -EIO;
 		break;
 	}
+	chan_wait(f);
 	ssize_t r;
 	for (;;) {
 		r = read(f->fd, f->msg, FUSED_MSGCAP);
@@ -471,6 +489,7 @@ int fused_write(fused_t *f, const char *path, uint64_t fh, const void *buf, size
 		if ((size_t) w != h.len) return -EIO;
 		break;
 	}
+	chan_wait(f);
 	ssize_t r;
 	for (;;) { r = read(f->fd, f->msg, FUSED_MSGCAP); if (r < 0) { if (errno == EINTR) continue; return -errno; } break; }
 	if ((size_t) r < sizeof(struct fuse_out_header)) return -EIO;
@@ -520,6 +539,27 @@ int fused_release(fused_t *f, const char *path, uint64_t fh)
 	rc = xfer(f, FUSE_RELEASE, nid, &in, sizeof in, NULL, 0, NULL);
 	if (rc == -ENOSYS) return 0;
 	return rc;
+}
+
+int fused_pread(fused_t *f, const char *path, void *buf, size_t size, off_t off)
+{
+	uint64_t fh = 0;
+	int rc = fused_open(f, path, O_RDONLY, &fh);
+	if (rc) return rc;
+	int n = fused_read(f, path, fh, buf, size, off);
+	fused_release(f, path, fh);
+	return n;
+}
+
+int fused_pwrite(fused_t *f, const char *path, const void *buf, size_t size, off_t off)
+{
+	uint64_t fh = 0;
+	int rc = fused_open(f, path, O_WRONLY, &fh);
+	if (rc) return rc;
+	int n = fused_write(f, path, fh, buf, size, off);
+	fused_flush(f, path, fh);
+	fused_release(f, path, fh);
+	return n;
 }
 
 int fused_readdir(fused_t *f, const char *path,

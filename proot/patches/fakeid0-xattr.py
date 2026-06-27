@@ -913,7 +913,18 @@ if 'uk_block_sysnums' not in s:
 import os
 EN = ROOT + "/syscall/enter.c"; s = rd(EN)
 if 'uknl_fs_dispatch' not in s:
-    fs_c = rd(os.path.join(os.path.dirname(os.path.abspath(__file__)), "uknl_fs_redirect.c"))
+    _pd = os.path.dirname(os.path.abspath(__file__))
+    # FUSE engine (phase 2/3): the redirect calls fused_* and references fused_t /
+    # the FUSE UAPI. fused.c is plain userspace C; inject it (preceded by the
+    # vendored kernel UAPI + the fused API header) right before the redirect, the
+    # same verbatim-paste mechanism. Strip fused.c's local #includes (their content
+    # is pasted just above) so they need no -I path when compiled inside enter.c.
+    fuse_uapi = rd(os.path.join(_pd, "fuse_kernel.h"))
+    fused_h   = rd(os.path.join(_pd, "fused.h"))
+    fused_c   = rd(os.path.join(_pd, "fused.c"))
+    fused_c   = fused_c.replace('#include "fused.h"\n', '').replace('#include "fuse_kernel.h"\n', '')
+    fuse_blob = fuse_uapi + "\n" + fused_h + "\n" + fused_c + "\n"
+    fs_c = fuse_blob + rd(os.path.join(_pd, "uknl_fs_redirect.c"))
     must('int translate_syscall_enter(Tracee *tracee)\n{' in s, "enter.c translate_syscall_enter anchor (fs)")
     s = s.replace('int translate_syscall_enter(Tracee *tracee)\n{',
                   fs_c + '\nint translate_syscall_enter(Tracee *tracee)\n{', 1)
@@ -945,6 +956,45 @@ if 'uknl_fs_dispatch' not in s:
                   'void apply_emulated_umount(Tracee *tracee)\n{\n'
                   '\tif (uknl_fs_umount_hook(tracee)) return;', 1)
     wr(EN, s)
+
+# ---- tracee/event.c: a re-entrant "pump the event loop until fd readable" used
+#      by the FUSE redirect. A guest libfuse daemon's /dev/fuse read()/write()
+#      trap at sysexit (they're in the FS seccomp filter), so the single-threaded
+#      tracer must NOT block in read(channel) while serving an accessor — it would
+#      deadlock the daemon (stopped at its read-exit, waiting to be restarted).
+#      Instead fused calls this to service OTHER tracees' stops (the daemon's in
+#      particular) until the reply lands on the channel. It mirrors event_loop()'s
+#      per-stop handling exactly. ----
+EV = ROOT + "/tracee/event.c"; s = rd(EV)
+if 'uknl_pump_until_readable' not in s:
+    must('int event_loop()\n{' in s, "event.c event_loop anchor (fuse pump)")
+    pump = (
+        '#include <poll.h>\n'
+        '/* NeoTerm FUSE: pump the tracer event loop until @fd is readable. Services\n'
+        ' * every other tracee stop (esp. the FUSE daemon producing the reply) exactly\n'
+        ' * like event_loop() does. The current tracee is mid-handling (not restarted),\n'
+        ' * so waitpid never returns it here. Returns 0 (readable) or -1 (no children). */\n'
+        'int uknl_pump_until_readable(int fd);\n'
+        'int uknl_pump_until_readable(int fd)\n{\n'
+        '\tstruct pollfd pfd;\n'
+        '\tfor (;;) {\n'
+        '\t\tpfd.fd = fd; pfd.events = POLLIN; pfd.revents = 0;\n'
+        '\t\tif (poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR)))\n'
+        '\t\t\treturn 0;\n'
+        '\t\tint tracee_status;\n'
+        '\t\tpid_t pid = waitpid(-1, &tracee_status, __WALL);\n'
+        '\t\tif (pid < 0) { if (errno == EINTR) continue; return -1; }\n'
+        '\t\tTracee *t = get_tracee(NULL, pid, true);\n'
+        '\t\tif (t == NULL) continue;\n'
+        '\t\tt->running = false;\n'
+        '\t\tif (notify_extensions(t, NEW_STATUS, tracee_status, 0) != 0) continue;\n'
+        '\t\tif (t->as_ptracee.ptracer != NULL) { if (handle_ptracee_event(t, tracee_status)) continue; }\n'
+        '\t\tint signal = handle_tracee_event(t, tracee_status);\n'
+        '\t\t(void) restart_tracee(t, signal);\n'
+        '\t}\n}\n\n'
+    )
+    s = s.replace('int event_loop()\n{', pump + 'int event_loop()\n{', 1)
+    wr(EV, s)
 
 # ---- syscall/exit.c: capture the fd returned by a redirected openat so reads/
 #      getdents/lseek on it can be proxied (uknl_fs_open_exit lives in enter.c). ----

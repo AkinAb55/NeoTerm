@@ -247,6 +247,12 @@ object ProotManager {
         mk("/dev/loop$n")
         for (p in 1..4) mk("/dev/loop${n}p$p")
       }
+      // FUSE: an empty marker bound onto /dev/fuse. A guest libfuse daemon
+      // (sshfs/rclone/gocryptfs/ntfs-3g/AppImage) open()s it; the proot redirect
+      // (UK_FS) turns that open into a socket()+connect() to an in-tracer channel
+      // driven by the `fused` engine, and routes mount(...,"fuse",...,"fd=N") plus
+      // the mountpoint's path ops through it. No kernel FUSE / root needed.
+      mk("/dev/fuse")
     }
 
     // USB-serial: /dev/ttyUSB* are VIRTUAL hotplug ports, not static binds — the

@@ -43,7 +43,8 @@ enum { PR_void = 0, PR_mount, PR_newfstatat, PR_fstatat64, PR_statx,
        PR_stat, PR_lstat, PR_stat64, PR_lstat64, PR_readlink, PR_symlink, PR_open, PR_creat,
        PR_getcwd, PR_fchmodat2, PR_copy_file_range, PR_sendfile, PR_sendfile64,
        PR_execve, PR_execveat, PR_msync, PR_ioctl,
-       PR_statfs, PR_statfs64, PR_fstatfs, PR_fstatfs64 };
+       PR_statfs, PR_statfs64, PR_fstatfs, PR_fstatfs64,
+       PR_socket, PR_connect };
 #ifndef EXDEV
 #define EXDEV 18
 #endif
@@ -78,6 +79,18 @@ static size_t         g_resp_blen, g_resp_bpos;
 static int uksd_wn(int s, const void *b, size_t n) { (void)s;(void)b;(void)n; return 0; }
 static int uksd_rl(int s, char *b, size_t bs) { (void)s; snprintf(b, bs, "%s", g_resp_line); return (int)strlen(b); }
 static int uksd_rn(int s, void *b, size_t n) { (void)s; if (g_resp_bpos + n > g_resp_blen) return -1; memcpy(b, g_resp_blob + g_resp_bpos, n); g_resp_bpos += n; return 0; }
+
+/* FUSE (phase 2/3): the redirect now calls fused_* + a few proot-core helpers
+ * (chained syscalls, alloc_mem, the event-loop pump). UKNL_FS_REDIRECT_TEST makes
+ * the redirect skip the proot-only #includes; we stub those symbols here and link
+ * the real fused.c so the FUSE wrappers type-check under -Wall -Wextra. */
+#define UKNL_FS_REDIRECT_TEST 1
+#include "fused.h"
+static word_t alloc_mem(Tracee *t, ssize_t size) { (void)t; (void)size; return 0; }
+static int register_chained_syscall(Tracee *t, int n, word_t a, word_t b, word_t c, word_t d, word_t e, word_t f)
+{ (void)t;(void)n;(void)a;(void)b;(void)c;(void)d;(void)e;(void)f; return 0; }
+static void force_chain_final_result(Tracee *t, word_t r) { (void)t; (void)r; }
+int uknl_pump_until_readable(int fd) { (void)fd; return 0; }
 
 #include "uknl_fs_redirect.c"   /* found via -I <repo>/proot/patches (see run_host_tests.sh) */
 

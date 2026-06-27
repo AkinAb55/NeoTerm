@@ -33,6 +33,14 @@ typedef struct fused fused_t;
  * daemon may use them; pass the guest's effective ids). Returns NULL on OOM. */
 fused_t *fused_new(int chan_fd, uint32_t uid, uint32_t gid);
 
+/* Install a "wait until the channel fd is readable" callback. Under proot the
+ * FUSE daemon is a ptraced tracee whose channel read()/write() trap at sysexit,
+ * so the single-threaded tracer must NOT block in read(channel) — it has to pump
+ * the event loop (servicing the daemon's stops) until a reply lands. This hook
+ * lets the redirect supply that pump; with no hook (e.g. the host test, where the
+ * daemon is an ordinary process) fused just blocks in read(). */
+void fused_set_wait(fused_t *f, void (*wait_readable)(int fd, void *ctx), void *ctx);
+
 /* FUSE_INIT handshake: negotiate version/flags with the daemon. Must be called
  * once before any op. Returns 0 on success, negative errno on failure. */
 int fused_init(fused_t *f);
@@ -54,6 +62,12 @@ int fused_write  (fused_t *f, const char *path, uint64_t fh, const void *buf, si
 int fused_flush  (fused_t *f, const char *path, uint64_t fh);
 int fused_fsync  (fused_t *f, const char *path, uint64_t fh, int datasync);
 int fused_release(fused_t *f, const char *path, uint64_t fh);
+
+/* Stateless pread/pwrite: open the path, do the I/O at `off`, release. Convenient
+ * for a path-based redirect that doesn't keep the guest's fh around. Return the
+ * byte count (>=0) or a negative errno. */
+int fused_pread (fused_t *f, const char *path, void *buf, size_t size, off_t off);
+int fused_pwrite(fused_t *f, const char *path, const void *buf, size_t size, off_t off);
 
 /* Directory listing. `emit` is called once per entry with (ctx, name, type),
  * where type is a DT_* value (DT_REG/DT_DIR/...) or 0 if unknown. "." and ".."

@@ -226,7 +226,7 @@ fi
 
 # ── 3. proot VFS-redirect: compile + getdents unit test ───────────────────────
 if gcc -Wall -Wextra -Wno-unused-function -Wno-unused-parameter \
-       -I "$ROOT/proot/patches" -o "$WORK/redir_test" "$HERE/fs_redirect_test.c" 2>"$WORK/redir.cc"; then
+       -I "$ROOT/proot/patches" -o "$WORK/redir_test" "$HERE/fs_redirect_test.c" "$ROOT/proot/patches/fused.c" 2>"$WORK/redir.cc"; then
   ok "proot redirect: uknl_fs_redirect.c compiles -Wall -Wextra"
   if "$WORK/redir_test" > "$WORK/redir.out" 2>&1; then
     sed 's/^/    /' "$WORK/redir.out"; ok "proot redirect: getdents synthesis unit test"
