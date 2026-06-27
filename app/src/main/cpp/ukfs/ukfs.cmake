@@ -61,16 +61,39 @@ foreach(c ${UKFS_EXFAT_SRC})
     COMPILE_DEFINITIONS "KBUILD_MODNAME=\"exfat_${c}\";CONFIG_EXFAT_FS=1;CONFIG_EXFAT_DEFAULT_IOCHARSET=\"utf8\"")
 endforeach()
 
+# --- ntfs3 driver: the full in-tree driver (its super.c registers ntfs3_fs_type).
+#     Larger than fat/exfat (uses an rbtree for run maps -> shim/core/rbtree.c, and a
+#     lib/ LZX/XPRESS decompressor). ntfs3_stubs.c supplies the few extra kernel
+#     symbols the shim doesn't. The MOUNT auto-probe tries it after vfat/exfat. ---
+set(UKFS_NTFS_DEFS -DCONFIG_NTFS3_FS=1 -DCONFIG_NTFS3_LZX_XPRESS=1 -DCONFIG_NLS_DEFAULT="utf8")
+file(GLOB UKFS_NTFS_MAIN ${UKFS_DIR}/linux/fs/ntfs3/*.c)
+foreach(c ${UKFS_NTFS_MAIN})
+  get_filename_component(b ${c} NAME_WE)
+  list(APPEND UKFS_OBJ_SRCS ${c})
+  set_source_files_properties(${c} PROPERTIES
+    COMPILE_DEFINITIONS "KBUILD_MODNAME=\"ntfs3_${b}\";CONFIG_NTFS3_FS=1;CONFIG_NTFS3_LZX_XPRESS=1;CONFIG_NLS_DEFAULT=\"utf8\"")
+endforeach()
+file(GLOB UKFS_NTFS_LIB ${UKFS_DIR}/linux/fs/ntfs3/lib/*.c)
+foreach(c ${UKFS_NTFS_LIB})
+  get_filename_component(b ${c} NAME_WE)
+  list(APPEND UKFS_OBJ_SRCS ${c})
+  # the LZX decompressor uses swap() without pulling <linux/minmax.h>; force-include it.
+  set_source_files_properties(${c} PROPERTIES
+    COMPILE_DEFINITIONS "KBUILD_MODNAME=\"ntfs3lib_${b}\";CONFIG_NTFS3_FS=1"
+    COMPILE_OPTIONS "-include;linux/minmax.h")
+endforeach()
+
 # --- shared FS engine: the vfat driver + VFS/ACL shim + kernel-API shim,
 #     compiled once and linked into both the test harness and the ukfsd server. ---
 add_library(ukfs_engine OBJECT
   ${UKFS_DIR}/shim/fs/vfs.c
   ${UKFS_DIR}/shim/fs/block_sock.c   # block-over-socket backend (io.neoterm.block)
   ${UKFS_DIR}/shim/fs/posix_acl.c
+  ${UKFS_DIR}/shim/fs/ntfs3_stubs.c  # extra kernel symbols ntfs3 needs
   ${UKFS_DIR}/shim/compat_bionic.c   # backtrace/hex/system_wq/get_random_u32 shims
   ${UKFS_OBJ_SRCS}
   ${UKFS_SHIM_CORE})
-target_include_directories(ukfs_engine PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat ${UKFS_DIR}/linux/fs/exfat)
+target_include_directories(ukfs_engine PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat ${UKFS_DIR}/linux/fs/exfat ${UKFS_DIR}/linux/fs/ntfs3 ${UKFS_DIR}/linux/fs/ntfs3/lib)
 target_compile_options(ukfs_engine PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 
 # --- ukfsd: io.neoterm.fs unix-socket server (the Android FS daemon) ---
@@ -79,12 +102,12 @@ target_compile_options(ukfs_engine PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 # the same deployment trick as libproot.so. FsBridge.kt launches it from there.
 add_executable(ukfsd ${UKFS_DIR}/shim/fs/ukfsd.c $<TARGET_OBJECTS:ukfs_engine>)
 set_target_properties(ukfsd PROPERTIES PREFIX "lib" OUTPUT_NAME "ukfsd" SUFFIX ".so")
-target_include_directories(ukfsd PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat ${UKFS_DIR}/linux/fs/exfat)
+target_include_directories(ukfsd PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat ${UKFS_DIR}/linux/fs/exfat ${UKFS_DIR}/linux/fs/ntfs3 ${UKFS_DIR}/linux/fs/ntfs3/lib)
 target_compile_options(ukfsd PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 target_link_libraries(ukfsd dl)
 
 # --- ukfs_test_vfat: standalone mount/list/read/write harness (dev/debug) ---
 add_executable(ukfs_test_vfat ${UKFS_DIR}/shim/fs/ukfs_test.c $<TARGET_OBJECTS:ukfs_engine>)
-target_include_directories(ukfs_test_vfat PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat ${UKFS_DIR}/linux/fs/exfat)
+target_include_directories(ukfs_test_vfat PRIVATE ${UKFS_INC} ${UKFS_DIR}/linux/fs/fat ${UKFS_DIR}/linux/fs/exfat ${UKFS_DIR}/linux/fs/ntfs3 ${UKFS_DIR}/linux/fs/ntfs3/lib)
 target_compile_options(ukfs_test_vfat PRIVATE ${UKFS_KCFLAGS} ${UKFS_FAT_DEFS})
 target_link_libraries(ukfs_test_vfat dl)

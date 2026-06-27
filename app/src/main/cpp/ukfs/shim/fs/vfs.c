@@ -970,7 +970,8 @@ int  simple_fsync_noflush(struct file *f, loff_t a, loff_t b, int d) { (void)f;(
 struct timespec64 simple_inode_init_ts(struct inode *inode) { struct timespec64 t={0,0}; if(inode){inode->i_atime=t;inode->i_mtime=t;inode->__i_ctime=t;} return t; }
 void simple_rename_timestamp(struct inode *a, struct dentry *b, struct inode *c, struct dentry *d) { (void)a;(void)b;(void)c;(void)d; }
 /* sync_blockdev: a registry MINDEN dirty bufferét kiírja (a held GD/SB-buffereket is). */
-int  sync_blockdev(struct block_device *b) { (void)b; for (struct uk_bhnode *n = g_bhlist; n; n = n->next) bh_writeback(n->bh); return 0; }
+void uk_flush_dirty_folios(void);   /* defined after g_fcache; flushes dirty page-cache folios */
+int  sync_blockdev(struct block_device *b) { (void)b; uk_flush_dirty_folios(); for (struct uk_bhnode *n = g_bhlist; n; n = n->next) bh_writeback(n->bh); return 0; }
 int  __sync_dirty_buffer(struct buffer_head *bh, int op) { (void)op; return sync_dirty_buffer(bh); }
 int  utf8_to_utf32(const char *s, int len, unsigned int *pu) { if(len<1) return -1; *pu=(unsigned char)*s; return 1; }
 vm_fault_t vmf_fs_error(int err) { (void)err; return VM_FAULT_SIGBUS; }
@@ -1088,13 +1089,23 @@ int ukfs_list_dir(const char *path, struct ukfs_dirent **out)
 	struct dir_context ctx = { .actor = api_collect, .pos = 0 };
 	dir->i_fop->iterate_shared(&f, &ctx);
 	if (dir->i_fop->release) dir->i_fop->release(dir, &f);
-	/* méretek feltöltése a TELJES úttal (a levél-név a listázott könyvtárhoz relatív) */
+	/* For each entry the driver reported as a FILE, look up the real inode to fill the
+	 * size AND verify the type. ntfs3's readdir derives d_type from the parent index
+	 * entry's duplicated attrs (dup.fa), which under-report a freshly-created directory
+	 * as DT_REG — so getdents would tell fts/rm a subdir is a file and `rm -rf` aborts
+	 * with EISDIR. The actual inode (i_mode) is authoritative, so correct dir-vs-file
+	 * here. (FAT/exfat already report the right type, so this only confirms them — and
+	 * the lookup was happening anyway for the size.) */
 	for (int i = 0; i < g_api_dirn; i++) {
 		if (g_api_dir[i].type != 2) continue;
 		char full[1024];
 		if (path && *path) snprintf(full, sizeof(full), "%s/%s", path, g_api_dir[i].name);
 		else { strncpy(full, g_api_dir[i].name, sizeof(full)-1); full[sizeof(full)-1]=0; }
-		g_api_dir[i].size = ukfs_file_size(full);
+		struct dentry *d = api_lookup(full);
+		if (d && d->d_inode && (d->d_inode->i_mode & 0170000) == 0040000)
+			g_api_dir[i].type = 1;                     /* really a directory */
+		else
+			g_api_dir[i].size = (d && d->d_inode) ? (long)d->d_inode->i_size : ukfs_file_size(full);
 	}
 	*out = g_api_dir;
 	return g_api_dirn;
@@ -1952,6 +1963,13 @@ long ukfs_write_file_at(const char *name, const char *data, size_t len, long lon
 		ssize_t w = inode->i_fop->write_iter(&iocb, &iter);
 		if (w < 0) return w;
 	} else return -4;
+	/* ntfs3's resident->non-resident conversion stashes the migrated data in a dirty
+	 * page-cache folio (attr_make_nonresident). uk_read serves from the BUFFER cache,
+	 * not folios, so push any dirty folios into the buffer cache now — otherwise an
+	 * in-session read of a just-converted file (e.g. appending past the ~600B resident
+	 * limit) sees zeros. Cheap: normal ntfs3 data writes use the MAPPED path (no dirty
+	 * folio), so this only does work right after a conversion. */
+	uk_flush_dirty_folios();
 	/* Keep the dir-entry/inode metadata current in the buffer cache (size grows as
 	 * the file is written), but DON'T sync to the block device here: sync_blockdev
 	 * writes the whole dirty-buffer list, so doing it per write() is O(n^2) for a
@@ -2003,6 +2021,46 @@ struct uk_fcache { struct address_space *m; pgoff_t idx; struct folio *fo; int r
 /* g_fcache: a teljes definíció — a fenti fwd-decl tentatív, itt egyesül vele. */
 static struct uk_fcache *fcache_find(struct address_space *m, pgoff_t idx)
 { for (struct uk_fcache *e = g_fcache; e; e = e->next) if (e->m == m && e->idx == idx) return e; return 0; }
+
+/* Flush dirty page-cache folios to disk. ntfs3 writes data through the page cache for
+ * some paths — notably attr_make_nonresident (resident->non-resident conversion), which
+ * folio_mark_dirty()s the migrated resident bytes and relies on writepages to persist
+ * them. Our writepages is a no-op, so without this the original contents of a small file
+ * that gets appended-to (forcing the conversion) were lost. Route each dirty folio's
+ * blocks through the buffer cache (bmap -> sb_bread -> mark dirty) so the subsequent
+ * g_bhlist writeback persists them, coherently with the iomap data path and reads. */
+void uk_flush_dirty_folios(void)
+{
+	for (struct uk_fcache *e = g_fcache; e; e = e->next) {
+		struct folio *fo = e->fo;
+		if (!fo || !(fo->flags & 4UL)) continue;            /* PG_dirty(bit2) only */
+		struct address_space *m = e->m;
+		char *data = folio_address(fo);
+		if (!m || !m->a_ops || !m->a_ops->bmap || !m->host || !data) { fo->flags &= ~4UL; continue; }
+		struct inode *inode = m->host;
+		unsigned bs = inode->i_sb->s_blocksize ? inode->i_sb->s_blocksize : g_blocksize;
+		unsigned per = 4096 / bs; if (!per) per = 1;
+		/* limit the writeback to what this folio actually owns: its valid extent (a
+		 * migration folio sets uk_valid to the migrated length) clamped to i_size — so
+		 * we never flush the zero-filled tail over data an iomap write put past it. */
+		unsigned limit = fo->uk_valid ? fo->uk_valid : 4096;
+		for (unsigned b = 0; b < per; b++) {
+			loff_t foff = (loff_t)e->idx * 4096 + (loff_t)b * bs;
+			if (foff >= inode->i_size || (loff_t)b * bs >= (loff_t)limit) break;
+			sector_t phys = m->a_ops->bmap(m, (sector_t)e->idx * per + b);
+			if (!phys) continue;
+			unsigned op = bs;
+			if (foff + op > inode->i_size) op = (unsigned)(inode->i_size - foff);
+			if ((loff_t)b * bs + op > (loff_t)limit) op = limit - (unsigned)((loff_t)b * bs);
+			struct buffer_head *bh = sb_bread(inode->i_sb, phys);
+			if (!bh) continue;
+			memcpy(bh->b_data, data + (size_t)b * bs, op);
+			mark_buffer_dirty(bh);
+			brelse(bh);
+		}
+		fo->flags &= ~4UL;                                  /* mark clean */
+	}
+}
 
 struct folio *__filemap_get_folio(struct address_space *mapping, pgoff_t index, int fgp, gfp_t gfp)
 {
@@ -2091,6 +2149,10 @@ void folio_put(struct folio *folio)
 	for (struct uk_fcache *e = g_fcache; e; pp = &e->next, e = e->next) {
 		if (e->fo == folio) {
 			if (--e->ref > 0) return;          /* még van hivatkozás */
+			if (folio->flags & 4UL) { e->ref = 0; return; }  /* DIRTY: keep in cache until
+				* writeback (uk_flush_dirty_folios) persists it — freeing it here drops the
+				* data, e.g. ntfs3's resident->non-resident migration folio_put()s right
+				* after marking it dirty, before the run is even set up. */
 			*pp = e->next; free(e);            /* leláncol */
 			free(folio->_priv); free(folio);
 			return;
@@ -2124,6 +2186,22 @@ void folio_zero_range(struct folio *folio, size_t from, size_t len)
 { char *d = folio_address(folio); if (d && from < 4096) { size_t n = (from + len > 4096) ? 4096 - from : len; memset(d + from, 0, n); } }
 void folio_zero_segment(struct folio *folio, size_t from, size_t to)
 { if (to > from) folio_zero_range(folio, from, to - from); }
+/* folio_fill_tail: copy @len bytes from @from into the folio at @offset, then zero the
+ * rest of the (4096) folio. ntfs3's attr_make_nonresident uses this to move resident
+ * file data into the page cache during the resident->non-resident conversion; the old
+ * no-op stub left the migrated data as zeros, so appending to a small file lost its
+ * original contents. */
+void folio_fill_tail(struct folio *folio, size_t offset, const char *from, size_t len)
+{
+	char *d = folio_address(folio);
+	if (!d || offset >= 4096) return;
+	if (from && len) { size_t n = (offset + len > 4096) ? 4096 - offset : len; memcpy(d + offset, from, n); offset += n; }
+	if (offset < 4096) memset(d + offset, 0, 4096 - offset);
+	/* This folio only OWNS [0, offset) — the migrated data. The zero-fill tail must
+	 * NOT clobber bytes a concurrent (iomap) write puts past it during the same
+	 * resident->non-resident conversion, so writeback flushes only this extent. */
+	if (folio) folio->uk_valid = (unsigned)offset;
+}
 
 /* ___ratelimit: engedjük át az ntfs3 hibaüzeneteit (diagnosztika) */
 int ___ratelimit(struct ratelimit_state *rs, const char *func) { (void)rs; (void)func; return 1; }
@@ -2233,7 +2311,26 @@ ssize_t iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *from,
 		} else if (iomap.type == 2 /*IOMAP_MAPPED*/ && iomap.addr != IOMAP_NULL_ADDR && chunk) {
 			written = copy_from_iter(tmp, chunk, from);
 			off_t doff = iomap.addr + (cpos - iomap.offset);
-			bdev_pwrite(tmp, written, doff);
+			/* Write THROUGH the buffer cache, not direct to the image. ntfs3's own
+			 * metadata + resident->nonresident migration writes go via the buffer cache
+			 * (ntfs_sb_write -> __getblk -> mark_buffer_dirty), so a direct bdev_pwrite
+			 * here is incoherent: a dirty cached buffer for the same block (e.g. the just-
+			 * migrated resident data when appending past 512B) flushes over it on close,
+			 * and in-session reads (sb_bread) see the stale buffer — the file reads back as
+			 * zeros. Routing through sb_bread/mark_buffer_dirty keeps writer, reader and
+			 * the deferred flush on one coherent cache. */
+			unsigned bs = inode->i_sb->s_blocksize ? inode->i_sb->s_blocksize : g_blocksize;
+			size_t left = written; off_t p = doff; const char *src = tmp;
+			while (left) {
+				sector_t blk = p / bs; unsigned bo = (unsigned)(p % bs);
+				unsigned op = bs - bo; if (op > left) op = (unsigned)left;
+				struct buffer_head *bh = sb_bread(inode->i_sb, blk);
+				if (!bh) break;
+				memcpy(bh->b_data + bo, src, op);
+				mark_buffer_dirty(bh);
+				brelse(bh);
+				p += op; src += op; left -= op;
+			}
 			done += written;
 		} else { from->count -= chunk; done += chunk; written = chunk; }   /* hole — átugorjuk */
 		/* iomap_end a chunk KEZDŐ pozíciójával + a ténylegesen írt bájtszámmal (a ntfs_iomap_end

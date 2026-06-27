@@ -7,6 +7,12 @@
 #include <stdbool.h>
 #include <sys/types.h>
 
+/* bionic's <sys/types.h> lacks the BSD `ulong` (glibc provides it under _GNU_SOURCE);
+ * the ntfs3 driver uses it, so define it on bionic. */
+#if defined(__BIONIC__)
+typedef unsigned long ulong;
+#endif
+
 #ifndef __BITS_PER_LONG
 #define __BITS_PER_LONG 64
 #endif

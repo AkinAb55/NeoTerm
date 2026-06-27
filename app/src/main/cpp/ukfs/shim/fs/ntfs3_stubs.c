@@ -20,8 +20,7 @@ long file_write_and_wait_range() { return 0; }
 long flush_dcache_folio() { return 0; }
 long flush_dcache_page() { return 0; }
 long folio_clear_dirty() { return 0; }
-long folio_fill_tail() { return 0; }
-/* folio_pos, folio_unlock, folio_zero_range, folio_zero_segment -> vfs.c (valódi impl.) */
+/* folio_fill_tail, folio_pos, folio_unlock, folio_zero_range, folio_zero_segment -> vfs.c (valódi impl.) */
 long fs_umode_to_dtype() { return 0; }
 long generic_file_llseek_size() { return 0; }
 long generic_file_open() { return 0; }

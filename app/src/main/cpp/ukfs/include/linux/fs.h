@@ -191,7 +191,7 @@ int generic_file_mmap_prepare(struct vm_area_desc *desc);
 #define _UK_PAGE_FOLIO
 struct page { unsigned long flags; struct address_space *mapping; pgoff_t index; void *_priv; };
 /* _priv = adatpuffer (folio_address); uk_bh = buffer_head-lánc (folio_buffers, ext4 write) */
-struct folio { struct page page; unsigned long flags; struct address_space *mapping; pgoff_t index; void *_priv; void *uk_bh; };
+struct folio { struct page page; unsigned long flags; struct address_space *mapping; pgoff_t index; void *_priv; void *uk_bh; unsigned uk_valid; };
 #endif
 struct file_ra_state { unsigned long start; unsigned int size; unsigned int async_size; unsigned int ra_pages; unsigned int mmap_miss; loff_t prev_pos; };
 struct block_device {

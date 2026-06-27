@@ -29,9 +29,10 @@ bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 skip() { echo "  SKIP  $1 ($2)"; SKIP=$((SKIP+1)); }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-KCF="-O2 -fno-strict-aliasing -fno-builtin -fshort-wchar -D_GNU_SOURCE -D__KERNEL__ -DMODULE -w -Wno-implicit-function-declaration -I $UKFS/include -I $UKFS/linux/fs/fat -I $UKFS/linux/fs/exfat"
+KCF="-O2 -fno-strict-aliasing -fno-builtin -fshort-wchar -D_GNU_SOURCE -D__KERNEL__ -DMODULE -w -Wno-implicit-function-declaration -I $UKFS/include -I $UKFS/linux/fs/fat -I $UKFS/linux/fs/exfat -I $UKFS/linux/fs/ntfs3 -I $UKFS/linux/fs/ntfs3/lib"
 FATDEF='-DCONFIG_VFAT_FS=1 -DCONFIG_FAT_FS=1 -DCONFIG_FAT_DEFAULT_CODEPAGE=437 -DCONFIG_FAT_DEFAULT_IOCHARSET="iso8859-1" -DCONFIG_FAT_DEFAULT_UTF8=0'
 EXDEF='-DCONFIG_EXFAT_FS=1 -DCONFIG_EXFAT_DEFAULT_IOCHARSET="utf8"'
+NDEF='-DCONFIG_NTFS3_FS=1 -DCONFIG_NTFS3_LZX_XPRESS=1 -DCONFIG_NLS_DEFAULT="utf8"'
 
 # ── build the engine + ukfsd + test harness for the host ──────────────────────
 build_host() {
@@ -44,7 +45,17 @@ build_host() {
     $cc -c $KCF $EXDEF $extra -DKBUILD_MODNAME="\"ex_$c\"" "$UKFS/linux/fs/exfat/$c.c" -o "$out/ex_$c.o" 2>"$out/ee_$c" || { echo "  (build) exfat/$c failed:"; grep -m3 error: "$out/ee_$c"; return 1; }
     obj="$obj $out/ex_$c.o"
   done
-  for f in vfs:shim/fs/vfs.c blocksock:shim/fs/block_sock.c posix_acl:shim/fs/posix_acl.c compat:shim/compat_bionic.c; do
+  for c in "$UKFS"/linux/fs/ntfs3/*.c; do
+    local b="$(basename "$c" .c)"
+    $cc -c $KCF $NDEF $extra -DKBUILD_MODNAME="\"n3_$b\"" "$c" -o "$out/n3_$b.o" 2>"$out/ne_$b" || { echo "  (build) ntfs3/$b failed:"; grep -m3 error: "$out/ne_$b"; return 1; }
+    obj="$obj $out/n3_$b.o"
+  done
+  for c in "$UKFS"/linux/fs/ntfs3/lib/*.c; do
+    local b="$(basename "$c" .c)"
+    $cc -c $KCF $NDEF $extra -include linux/minmax.h -DKBUILD_MODNAME="\"n3lib_$b\"" "$c" -o "$out/n3lib_$b.o" 2>"$out/nle_$b" || { echo "  (build) ntfs3/lib/$b failed:"; grep -m3 error: "$out/nle_$b"; return 1; }
+    obj="$obj $out/n3lib_$b.o"
+  done
+  for f in vfs:shim/fs/vfs.c blocksock:shim/fs/block_sock.c posix_acl:shim/fs/posix_acl.c ntstub:shim/fs/ntfs3_stubs.c compat:shim/compat_bionic.c; do
     local b="${f%%:*}" src="${f##*:}"
     $cc -c $KCF $FATDEF $extra "$UKFS/$src" -o "$out/$b.o" 2>"$out/e_$b" || { echo "  (build) $src failed:"; grep -m3 error: "$out/e_$b"; return 1; }
     obj="$obj $out/$b.o"
@@ -111,6 +122,17 @@ if [ -x "$WORK/ukfs_test_vfat" ] && have mkfs.exfat; then
   else bad "exfat engine: write/read"; fi
 else
   skip "exfat engine direct test" "no ukfs_test_vfat or mkfs.exfat"
+fi
+
+# ── 1c. ntfs3 engine: mount + write + read-back on a fresh image ───────────────
+if [ -x "$WORK/ukfs_test_vfat" ] && have mkfs.ntfs; then
+  dd if=/dev/zero of="$WORK/nt.img" bs=1M count=48 status=none 2>/dev/null
+  mkfs.ntfs -F -Q "$WORK/nt.img" >/dev/null 2>&1
+  if "$WORK/ukfs_test_vfat" ntfs3 "$WORK/nt.img" rw 2>/dev/null | grep -q "ukfs_write_file = 20"; then
+    ok "ntfs3 engine: mount + write + read-back"
+  else bad "ntfs3 engine: write/read"; fi
+else
+  skip "ntfs3 engine direct test" "no ukfs_test_vfat or mkfs.ntfs"
 fi
 
 # ── 2. ukfsd + io.neoterm.fs/block end-to-end ─────────────────────────────────

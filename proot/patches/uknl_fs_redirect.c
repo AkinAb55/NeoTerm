@@ -438,8 +438,15 @@ static int g_inh_n = 0;
 static int inh_mark(int tg)   /* returns 1 if already resolved, else records + returns 0 */
 {
 	for (int i = 0; i < g_inh_n; i++) if (g_inh_tgid[i] == tg) return 1;
-	if (g_inh_n < 512) g_inh_tgid[g_inh_n++] = tg;
-	return g_inh_n >= 512;     /* table full: treat as resolved (skip the walk) */
+	/* RECYCLE when full instead of permanently returning "resolved" — a long
+	 * fork-heavy session (git clone forks dozens of processes) would otherwise fill
+	 * the table and then SKIP inheritance for every new forked child, so its writes to
+	 * an inherited vmount fd (`yes | head > file`) hit the empty placeholder and the
+	 * file reads back as zeros. Re-walks after a recycle are made safe by the
+	 * duplicate guard in vfd_lookup (it won't re-copy an fd the child already has). */
+	if (g_inh_n >= 512) g_inh_n = 0;
+	g_inh_tgid[g_inh_n++] = tg;
+	return 0;
 }
 static struct ukfs_vfd *vfd_lookup(Tracee *tracee, int fd)
 {
@@ -458,6 +465,7 @@ static struct ukfs_vfd *vfd_lookup(Tracee *tracee, int fd)
 				if (g_vfd[i].used && g_vfd[i].pid == ptg) idx[ni++] = i;
 			if (ni) {
 				for (int k = 0; k < ni; k++) {
+					if (vfd_find(tg, g_vfd[idx[k]].fd)) continue;   /* already have it (recycled re-walk) */
 					struct ukfs_vfd *nv = vfd_alloc();
 					if (!nv) break;
 					*nv = g_vfd[idx[k]]; nv->pid = tg;
