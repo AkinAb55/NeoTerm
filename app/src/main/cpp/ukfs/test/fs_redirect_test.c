@@ -23,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/time.h>
+#include <signal.h>
 
 typedef unsigned long word_t;
 typedef struct { int pid; struct { char *cwd; } *fs; } Tracee;   /* fs->cwd: guest CWD */

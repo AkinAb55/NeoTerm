@@ -227,6 +227,42 @@ void uknl_fuse_drain_parked(void)
 			fch_resume_eof(&g_fch[i]);
 }
 
+/* True if `pid` has an unblocked, pending fatal default signal (INT/TERM/HUP/
+ * QUIT/KILL). A parked daemon is ptrace-stopped and can't act on a signal while
+ * we hold it, so e.g. ^C on the app (SIGINT to the group) just queues on the
+ * squashfuse daemon and the mount leaks. We poll this to release it. */
+static int fch_has_fatal_pending(int pid)
+{
+	char p[64]; snprintf(p, sizeof p, "/proc/%d/status", pid);
+	int fd = open(p, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) return 0;
+	char b[4096]; ssize_t n = read(fd, b, sizeof b - 1); close(fd);
+	if (n <= 0) return 0;
+	b[n] = '\0';
+	unsigned long long pnd = 0, shd = 0, blk = 0; char *s;
+	if ((s = strstr(b, "SigPnd:"))) pnd = strtoull(s + 7, NULL, 16);
+	if ((s = strstr(b, "ShdPnd:"))) shd = strtoull(s + 7, NULL, 16);
+	if ((s = strstr(b, "SigBlk:"))) blk = strtoull(s + 7, NULL, 16);
+	unsigned long long fatal =
+		(1ULL << (SIGINT - 1)) | (1ULL << (SIGTERM - 1)) |
+		(1ULL << (SIGHUP - 1)) | (1ULL << (SIGQUIT - 1)) | (1ULL << (SIGKILL - 1));
+	return (((pnd | shd) & fatal) & ~blk) != 0;     /* KILL is never in SigBlk */
+}
+
+/* Release any parked daemon that has a pending fatal signal: hand it EOF so
+ * libfuse leaves its session loop, unmounts (-> our umount hook frees the
+ * channel + mount) and the process exits. Without this an interrupted app
+ * (rpi-imager ^C'd) leaves its squashfuse parked and mounted forever, and the
+ * mounts pile up until new launches misbehave. Cheap no-op when nothing parked. */
+void uknl_fuse_reap_signaled(void);
+void uknl_fuse_reap_signaled(void)
+{
+	for (int i = 0; i < UK_NFCH; i++)
+		if (g_fch[i].used && g_fch[i].parked && g_fch[i].dmn &&
+		    fch_has_fatal_pending(g_fch[i].dmn->pid))
+			fch_resume_eof(&g_fch[i]);
+}
+
 static struct ukfch *fch_by_fd(int pid, int fd)
 {
 	for (int i = 0; i < UK_NFCH; i++)

@@ -971,6 +971,7 @@ if 'uknl_pump_one' not in s:
     pump = (
         'extern int uknl_fuse_take_park(int pid);   /* FUSE: park a daemon read */\n'
         'extern void uknl_fuse_drain_parked(void);  /* FUSE: EOF all parked daemons */\n'
+        'extern void uknl_fuse_reap_signaled(void); /* FUSE: EOF signalled parked daemons */\n'
         'extern int uknl_fuse_is_daemon(int pid);   /* FUSE: pid owns a channel? */\n'
         '\n'
         '/* Deferred tracee stops. While the re-entrant FUSE pump (uknl_pump_one) is\n'
@@ -1039,11 +1040,14 @@ if 'uknl_pump_one' not in s:
     must(ml_anchor in s, "event.c main-loop restart anchor (fuse park)")
     s = s.replace(ml_anchor,
                   '\t\tsignal = handle_tracee_event(tracee, tracee_status);\n'
-                  '\t\t/* FUSE: when the root (session-leader, vpid 1) tracee exits, a\n'
-                  '\t\t * daemonized FUSE server still parked in read(/dev/fuse) would keep\n'
-                  '\t\t * proot alive forever (no ECHILD). EOF them so they exit too. */\n'
-                  '\t\tif ((WIFEXITED(tracee_status) || WIFSIGNALED(tracee_status)) && tracee->vpid == 1)\n'
-                  '\t\t\tuknl_fuse_drain_parked();\n'
+                  '\t\t/* FUSE: a tracee exited. If it was the session leader (vpid 1), EOF\n'
+                  '\t\t * every parked daemon so proot can reach ECHILD and exit. Otherwise\n'
+                  '\t\t * (e.g. the app was ^C\'d) release any parked daemon that now has a\n'
+                  '\t\t * pending fatal signal, so its mount is torn down instead of leaking. */\n'
+                  '\t\tif (WIFEXITED(tracee_status) || WIFSIGNALED(tracee_status)) {\n'
+                  '\t\t\tif (tracee->vpid == 1) uknl_fuse_drain_parked();\n'
+                  '\t\t\telse uknl_fuse_reap_signaled();\n'
+                  '\t\t}\n'
                   '\t\tif (uknl_fuse_take_park((int) pid)) continue;   /* parked FUSE daemon read */\n'
                   '\t\t(void) restart_tracee(tracee, signal);', 1)
     wr(EV, s)
