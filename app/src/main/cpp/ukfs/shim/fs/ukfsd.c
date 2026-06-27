@@ -227,6 +227,40 @@ static int do_two_path(int fd, const char *cmd, size_t alen, size_t blen)
 	return r < 0 ? reply_err(fd, as_errno(r, EIO)) : reply_ok(fd);
 }
 
+/* Strip a trailing "pN" partition suffix from a device token (mirrors Linux
+ * /dev/sda1 naming → uksd0p1). Writes the bare device token into `bare`, returns
+ * the 1-based partition number, or 0 if there is no suffix. "uksd0" → 0 (the
+ * trailing '0' is not preceded by 'p'); "uksd0p2" → 2, bare="uksd0". */
+static int part_suffix(const char *token, char *bare, size_t cap)
+{
+	size_t n = strlen(token), i = n;
+	while (i > 0 && token[i-1] >= '0' && token[i-1] <= '9') i--;
+	if (i < n && i >= 2 && token[i-1] == 'p') {
+		int pn = atoi(token + i);
+		size_t blen = i - 1; if (blen >= cap) blen = cap - 1;
+		memcpy(bare, token, blen); bare[blen] = '\0';
+		return pn > 0 ? pn : 0;
+	}
+	snprintf(bare, cap, "%s", token);
+	return 0;
+}
+
+/* Mount one filesystem at the given device path. `base`/`size` (bytes) select a
+ * partition (0/0 = whole device). fstype "auto" probes the engine's drivers. */
+static int mount_at(const char *fstype, const char *path, int is_part, long long base, long long size)
+{
+	static const char *cands[] = { "vfat", "exfat", "ntfs3", "ext4", NULL };
+	if (strcmp(fstype, "auto") == 0) {
+		for (int i = 0; cands[i]; i++) {
+			fprintf(stderr, "ukfsd: MOUNT auto trying %s on %s (base=%lld)\n", cands[i], path, base); fflush(stderr);
+			int r = is_part ? ukfs_mount_part(cands[i], path, base, size) : ukfs_mount(cands[i], path);
+			if (r == 0) { fprintf(stderr, "ukfsd: MOUNT %s OK\n", cands[i]); fflush(stderr); return 0; }
+		}
+		return -1;
+	}
+	return is_part ? ukfs_mount_part(fstype, path, base, size) : ukfs_mount(fstype, path);
+}
+
 /* Dispatch one request line (payloads read inline). Returns 0 to keep the
  * connection, -1 to drop it (EOF or a broken binary frame). */
 static int handle(int fd, char *line)
@@ -235,24 +269,44 @@ static int handle(int fd, char *line)
 	char fstype[64], token[512];
 
 	if (sscanf(line, "MOUNT %63s %511s", fstype, token) == 2) {
-		char path[600]; dev_path(token, path, sizeof path);
-		fprintf(stderr, "ukfsd: MOUNT recv fstype=%s token=%s -> path=%s\n", fstype, token, path); fflush(stderr);
-		if (strcmp(fstype, "auto") == 0) {
-			/* probe the engine's filesystems in turn (matches libukfs_all's
-			 * lazy mount). uk_mount rejects an unregistered name before it
-			 * touches the device, so a miss is cheap. */
-			static const char *cands[] = { "vfat", "exfat", "ntfs3", "ext4", NULL };
-			for (int i = 0; cands[i]; i++) {
-				fprintf(stderr, "ukfsd: MOUNT auto trying %s on %s\n", cands[i], path); fflush(stderr);
-				if (ukfs_mount(cands[i], path) == 0) {
-					fprintf(stderr, "ukfsd: MOUNT %s OK\n", cands[i]); fflush(stderr);
-					return reply_ok(fd);
-				}
+		char bare[512]; int pn = part_suffix(token, bare, sizeof bare);
+		char path[600]; dev_path(bare, path, sizeof path);
+		fprintf(stderr, "ukfsd: MOUNT recv fstype=%s token=%s -> path=%s part=%d\n", fstype, token, path, pn); fflush(stderr);
+		long long base = 0, size = 0; int is_part = 0;
+		if (pn > 0) {
+			/* resolve the partition's byte range from the on-device table */
+			struct ukfs_part parts[64];
+			int np_ = ukfs_probe_partitions(path, parts, 64);
+			int found = -1;
+			for (int i = 0; i < np_; i++) if (parts[i].idx == (unsigned)pn) { found = i; break; }
+			if (found < 0) {
+				fprintf(stderr, "ukfsd: MOUNT: partition %d not found (%d on device)\n", pn, np_); fflush(stderr);
+				return reply_err(fd, ENODEV);
 			}
-			fprintf(stderr, "ukfsd: MOUNT auto: all candidates failed\n"); fflush(stderr);
-			return reply_err(fd, ENODEV);
+			base = (long long)parts[found].start; size = (long long)parts[found].size; is_part = 1;
 		}
-		return ukfs_mount(fstype, path) == 0 ? reply_ok(fd) : reply_err(fd, ENODEV);
+		if (mount_at(fstype, path, is_part, base, size) == 0) return reply_ok(fd);
+		fprintf(stderr, "ukfsd: MOUNT: all candidates failed\n"); fflush(stderr);
+		return reply_err(fd, ENODEV);
+	}
+	/* PARTS <token>: enumerate the device's partition table. Reply "OK <n>\n"
+	 * then n lines "p<idx> 0x<type> <start_bytes> <size_bytes>\n". n=0 means the
+	 * device has no partition table (mount the whole device as a superfloppy). */
+	if (sscanf(line, "PARTS %511s", token) == 1) {
+		char bare[512]; part_suffix(token, bare, sizeof bare);
+		char path[600]; dev_path(bare, path, sizeof path);
+		struct ukfs_part parts[64];
+		int n = ukfs_probe_partitions(path, parts, 64);
+		if (n < 0) return reply_err(fd, ENODEV);
+		char hdr[32]; snprintf(hdr, sizeof hdr, "OK %d\n", n);
+		if (reply(fd, hdr) < 0) return -1;
+		for (int i = 0; i < n; i++) {
+			char b[96];
+			snprintf(b, sizeof b, "p%u 0x%02x %llu %llu\n",
+			         parts[i].idx, parts[i].type, parts[i].start, parts[i].size);
+			if (reply(fd, b) < 0) return -1;
+		}
+		return 0;
 	}
 	if (!strcmp(line, "UMOUNT"))  return reply_ok(fd);
 	if (!strcmp(line, "STATFS"))  return do_statfs(fd);

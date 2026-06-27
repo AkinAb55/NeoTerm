@@ -9,6 +9,16 @@ struct ukfs_dirent { char name[256]; unsigned long ino; int type; long size; };
 
 /* mount: a valódi FS-driver module_init-je + uk_mount; 0=siker */
 int  ukfs_mount(const char *fstype, const char *img);
+
+/* ===== partíciós tábla (MBR/GPT) =====
+ * Egy partíciós bejegyzés: 1-alapú index, MBR-típusbájt (GPT-nél 0), kezdő bájt-offset és
+ * méret bájtban. Egy Raspberry Pi image-en pl. p1=FAT32(boot)+p2=ext4(root). */
+struct ukfs_part { unsigned idx; unsigned type; unsigned long long start; unsigned long long size; };
+/* az eszköz partícióinak felderítése (MBR elsődleges+logikai, vagy GPT). Visszaadja a
+ * darabszámot (0 = nincs tábla / superfloppy), -1 = az eszköz nem nyitható. */
+int  ukfs_probe_partitions(const char *img, struct ukfs_part *out, int maxn);
+/* egy konkrét partíció mountolása: base/size bájtban (ukfs_probe_partitions adja). 0=siker. */
+int  ukfs_mount_part(const char *fstype, const char *img, long long base, long long size);
 /* remount: a lemez-állapot FRISS újraolvasása (párhuzamos íráshoz, a zár alatt); 0=siker */
 int  ukfs_remount(const char *fstype, const char *img);
 /* fájlrendszer-statisztika (df / statvfs) a driver s_op->statfs-én át; 0=siker, -1=hiba */

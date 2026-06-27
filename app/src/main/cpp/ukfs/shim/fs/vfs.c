@@ -53,6 +53,15 @@ static int   g_bdev_fd = -1;       /* image-backend fd */
 static int   g_bdev_sock = -1;     /* 0 = block-over-socket active, -1 = not */
 static unsigned g_blocksize = 512;
 
+/* ===== partíció-támogatás =====
+ * A block-backend a TELJES eszközt szolgálja ki (egy Raspberry Pi image-en pl. egy
+ * MBR partíciós tábla + FAT32 boot + ext4 root). A FS-driver a partíció 0. szektorától
+ * indexel; a g_part_base-t MINDEN block-I/O eltolásához hozzáadjuk, így a driver a
+ * partíciót látja "egész eszközként". g_part_size != 0 esetén bdev_nr_bytes ezt adja
+ * vissza (a driver ne lásson túl a partíció végén). 0/0 = teljes eszköz (superfloppy). */
+static off_t g_part_base = 0;      /* a partíció kezdő bájt-offsetje az eszközön */
+static off_t g_part_size = 0;      /* a partíció mérete bájtban (0 = teljes eszköz) */
+
 /* ===== block-over-socket backend (io.neoterm.block) =====
  * On Android there is no real /dev/uksd0: the USB block device is served by the
  * BlockBridge over the abstract socket io.neoterm.block. When uk_mount is given
@@ -79,9 +88,9 @@ static int g_bdev_iocount = 0;
 static int uk_bdev_should_fail(void){ int n=uk_bdev_fail_every(); if(n<=0)return 0; return (++g_bdev_iocount % n)==0; }
 /* egyetlen nyers I/O-próba (a hiba-injektálással) */
 static ssize_t bdev_pread1(void *buf, size_t len, off_t off)
-{ long d=uk_bdev_delay(); if(d>0) usleep(d); if(uk_bdev_should_fail()){errno=EIO;return -1;} if(g_bdev_sock>=0) return bsock_pread(buf,len,off); return pread(g_bdev_fd, buf, len, off); }
+{ off += g_part_base; long d=uk_bdev_delay(); if(d>0) usleep(d); if(uk_bdev_should_fail()){errno=EIO;return -1;} if(g_bdev_sock>=0) return bsock_pread(buf,len,off); return pread(g_bdev_fd, buf, len, off); }
 static ssize_t bdev_pwrite1(const void *buf, size_t len, off_t off)
-{ long d=uk_bdev_delay(); if(d>0) usleep(d); if(uk_bdev_should_fail()){errno=EIO;return -1;} if(g_bdev_sock>=0) return bsock_pwrite(buf,len,off); return pwrite(g_bdev_fd, buf, len, off); }
+{ off += g_part_base; long d=uk_bdev_delay(); if(d>0) usleep(d); if(uk_bdev_should_fail()){errno=EIO;return -1;} if(g_bdev_sock>=0) return bsock_pwrite(buf,len,off); return pwrite(g_bdev_fd, buf, len, off); }
 /* ÚJRAPRÓBÁLÓ bdev-I/O: a valós USB-pendrive ÁTMENETI hibáit (amit a block.so néha felszínre hoz)
  * elnyeli a FS-logika ELŐTT — különben az ext4/jbd2 hibakezelő-útja SIGTRAP/segfaultot ad. 8 próba
  * kis backoffal; csak a TARTÓS hiba jut át (EIO), amit a FS gracefully kezel (cp EIO, nem crash). */
@@ -1001,10 +1010,113 @@ int ukfs_mount(const char *fstype, const char *img)
 	memset(g_ihash, 0, sizeof(g_ihash));
 	g_fcache = NULL;
 	g_blocksize = 512;
+	g_part_base = 0; g_part_size = 0;   /* teljes eszköz (superfloppy) — partícióhoz ukfs_mount_part */
 	if (g_bdev_fd >= 0) { close(g_bdev_fd); g_bdev_fd = -1; }
 	if (g_bdev_sock >= 0) { bsock_close(); g_bdev_sock = -1; }
 	g_api_root = uk_mount(fstype, img);
 	return (g_api_root && g_api_root->d_inode) ? 0 : -1;
+}
+
+/* ===== partíciós tábla (struct ukfs_part: uk_fs_api.h) =====
+ * A driver-független auto-probe dönti el a tényleges FS-típust; az MBR-típusbájt csak info. */
+
+/* nyers szektor-olvasás a backend-en KÖZVETLENÜL (a g_part_base/cache megkerülésével):
+ * a partíciós tábla az eszköz ABSZOLÚT 0/1. szektorában van. */
+static ssize_t raw_dev_read(int viasock, int fd, void *buf, size_t len, off_t off)
+{ if (viasock) return bsock_pread(buf, len, off); return pread(fd, buf, len, off); }
+
+static unsigned le32(const unsigned char *p){ return (unsigned)p[0]|((unsigned)p[1]<<8)|((unsigned)p[2]<<16)|((unsigned)p[3]<<24); }
+static unsigned long long le64(const unsigned char *p){ return (unsigned long long)le32(p) | ((unsigned long long)le32(p+4)<<32); }
+
+/* GPT beolvasása (a védő-MBR 0xEE típusa után). out[]-ba tölt, visszaadja a darabszámot. */
+static int probe_gpt(int viasock, int fd, struct ukfs_part *out, int maxn)
+{
+	unsigned char hdr[512];
+	if (raw_dev_read(viasock, fd, hdr, 512, 512) != 512) return 0;        /* LBA1 = GPT header */
+	if (memcmp(hdr, "EFI PART", 8) != 0) return 0;
+	unsigned long long ent_lba = le64(hdr + 72);
+	unsigned num = le32(hdr + 80), esz = le32(hdr + 84);
+	if (esz < 128 || esz > 4096 || num == 0 || num > 256) return 0;
+	int n = 0;
+	unsigned char ent[4096];
+	for (unsigned i = 0; i < num && n < maxn; i++) {
+		off_t eoff = (off_t)ent_lba * 512 + (off_t)i * esz;
+		if (raw_dev_read(viasock, fd, ent, esz, eoff) != (ssize_t)esz) break;
+		int empty = 1; for (int k = 0; k < 16; k++) if (ent[k]) { empty = 0; break; }
+		if (empty) continue;                                              /* nem használt bejegyzés */
+		unsigned long long first = le64(ent + 32), last = le64(ent + 40);
+		if (last < first) continue;
+		out[n].idx = (unsigned)(i + 1); out[n].type = 0;                  /* GPT: típus GUID, nem bájt */
+		out[n].start = first * 512ULL; out[n].size = (last - first + 1) * 512ULL;
+		n++;
+	}
+	return n;
+}
+
+/* MBR + (védő-MBR esetén) GPT beolvasása. Visszaadja a partíciók számát, vagy 0-t (nincs tábla). */
+int ukfs_probe_partitions(const char *devpath, struct ukfs_part *out, int maxn)
+{
+	int viasock = 0, fd = -1;
+	if (devpath[0] == '@') { if (bsock_open(devpath + 1) != 0) return -1; viasock = 1; }
+	else { fd = open(devpath, O_RDONLY); if (fd < 0) return -1; }
+
+	unsigned char mbr[512]; int n = 0;
+	if (raw_dev_read(viasock, fd, mbr, 512, 0) != 512) goto done;
+	if (mbr[510] != 0x55 || mbr[511] != 0xAA) goto done;                  /* nincs MBR-aláírás */
+
+	/* GPT védő-MBR? (egyetlen 0xEE típusú bejegyzés) */
+	if (mbr[0x1BE + 4] == 0xEE) { n = probe_gpt(viasock, fd, out, maxn); goto done; }
+
+	/* MBR elsődleges partíciók (4 bejegyzés à 16 bájt @0x1BE). 0x05/0x0F = kiterjesztett (EBR-lánc). */
+	unsigned long long ext_start = 0;
+	for (int i = 0; i < 4 && n < maxn; i++) {
+		const unsigned char *e = mbr + 0x1BE + i * 16;
+		unsigned type = e[4]; unsigned long long start = le32(e + 8), secs = le32(e + 12);
+		if (type == 0 || secs == 0) continue;
+		if (type == 0x05 || type == 0x0F) { if (!ext_start) ext_start = start; continue; }
+		out[n].idx = (unsigned)(i + 1); out[n].type = type;
+		out[n].start = start * 512ULL; out[n].size = secs * 512ULL;
+		n++;
+	}
+	/* logikai partíciók a kiterjesztett partícióban (EBR-lánc) — index 5-től */
+	if (ext_start && n < maxn) {
+		unsigned long long ebr = ext_start; int logi = 5, guard = 0;
+		while (ebr && n < maxn && guard++ < 64) {
+			unsigned char eb[512];
+			if (raw_dev_read(viasock, fd, eb, 512, (off_t)ebr * 512) != 512) break;
+			if (eb[510] != 0x55 || eb[511] != 0xAA) break;
+			const unsigned char *e0 = eb + 0x1BE;
+			unsigned long long lstart = le32(e0 + 8), lsecs = le32(e0 + 12);
+			if (e0[4] && lsecs) {
+				out[n].idx = (unsigned)logi++; out[n].type = e0[4];
+				out[n].start = (ebr + lstart) * 512ULL; out[n].size = lsecs * 512ULL;
+				n++;
+			}
+			const unsigned char *e1 = eb + 0x1BE + 16;                    /* következő EBR-re mutat */
+			unsigned long long nxt = le32(e1 + 8);
+			ebr = nxt ? ext_start + nxt : 0;
+		}
+	}
+done:
+	if (viasock) bsock_close(); else if (fd >= 0) close(fd);
+	return n;
+}
+
+/* Egy konkrét partíció mountolása: base/size bájtban (a ukfs_probe_partitions adta), majd a
+ * szokásos auto/explicit mount — a g_part_base miatt a driver a partíciót látja egész eszközként. */
+int ukfs_mount_part(const char *fstype, const char *img, long long base, long long size)
+{
+	if (!g_api_inited) { ukernel_run_module_inits(); g_api_inited = 1; }
+	g_bhlist = NULL;
+	memset(g_ihash, 0, sizeof(g_ihash));
+	g_fcache = NULL;
+	g_blocksize = 512;
+	if (g_bdev_fd >= 0) { close(g_bdev_fd); g_bdev_fd = -1; }
+	if (g_bdev_sock >= 0) { bsock_close(); g_bdev_sock = -1; }
+	g_part_base = (off_t)base; g_part_size = (off_t)size;
+	g_api_root = uk_mount(fstype, img);
+	if (!(g_api_root && g_api_root->d_inode)) { g_part_base = 0; g_part_size = 0; return -1; }
+	return 0;
 }
 
 /* ===== ukfs_remount: a lemez-állapot FRISS újraolvasása (a párhuzamos íráshoz) =====
@@ -2211,7 +2323,14 @@ struct buffer_head *sb_bread_unmovable(struct super_block *sb, sector_t block) {
 
 /* bdev_nr_bytes: a backend (image/eszköz) tényleges mérete — az ntfs3 ebből számol blocks-ot */
 #include <sys/stat.h>
-u64 bdev_nr_bytes(struct block_device *bdev) { (void)bdev; if (g_bdev_sock >= 0) { long long sz = bsock_size(); return sz > 0 ? (u64)sz : 0; } struct stat st; if (g_bdev_fd >= 0 && fstat(g_bdev_fd, &st) == 0) { if (st.st_size) return st.st_size; off_t e = lseek(g_bdev_fd, 0, SEEK_END); return e > 0 ? (u64)e : 0; } return 0; }
+u64 bdev_nr_bytes(struct block_device *bdev) { (void)bdev;
+	/* partícióra mountolva a driver a partíció méretét lássa, ne a teljes eszközét */
+	if (g_part_size > 0) return (u64)g_part_size;
+	u64 total = 0;
+	if (g_bdev_sock >= 0) { long long sz = bsock_size(); total = sz > 0 ? (u64)sz : 0; }
+	else { struct stat st; if (g_bdev_fd >= 0 && fstat(g_bdev_fd, &st) == 0) { total = st.st_size ? (u64)st.st_size : (u64)({off_t e=lseek(g_bdev_fd,0,SEEK_END); e>0?e:0;}); } }
+	if (g_part_base > 0 && total > (u64)g_part_base) total -= (u64)g_part_base;
+	return total; }
 
 /* inode_state_read_once: az ntfs3 az I_NEW-t ebből olvassa (iget5_locked állítja) */
 unsigned long inode_state_read_once(struct inode *inode) { return inode ? inode->i_state : 0; }

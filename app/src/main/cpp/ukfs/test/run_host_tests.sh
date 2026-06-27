@@ -152,6 +152,44 @@ else
   skip "ext4 engine direct test" "no ukfs_test_vfat or mkfs.ext4"
 fi
 
+# ── 1e. partition table: PARTS enumeration + per-partition MOUNT (uksd0pN) ─────
+#        Build a Raspberry-Pi-like MBR image (FAT32 boot + ext4 root) hermetically
+#        — mkfs into files, dd into the whole-disk image at the partition offsets,
+#        hand-write the MBR table (no loop device / root needed), seed FAT via mcopy. ──
+if [ -x "$WORK/ukfsd" ] && have mkfs.vfat && have mkfs.ext4 && have mcopy && have python3; then
+  PDIR="$WORK/pdev"; mkdir -p "$PDIR"
+  P1_START=2048; P1_SECS=$((48*1024*1024/512))           # 48 MiB FAT32 @ 1 MiB
+  P2_START=$((P1_START+P1_SECS)); P2_SECS=$((64*1024*1024/512))  # 64 MiB ext4
+  TOTAL=$((P2_START+P2_SECS+2048))
+  dd if=/dev/zero of="$PDIR/uksd0" bs=512 count="$TOTAL" status=none
+  dd if=/dev/zero of="$WORK/p1.fat" bs=512 count="$P1_SECS" status=none
+  mkfs.vfat -F32 -n BOOT "$WORK/p1.fat" >/dev/null 2>&1
+  printf 'console=serial0 root=/dev/mmcblk0p2\n' > "$WORK/cmdline.txt"
+  MTOOLS_SKIP_CHECK=1 mcopy -i "$WORK/p1.fat" "$WORK/cmdline.txt" ::CMDLINE.TXT 2>/dev/null
+  dd if=/dev/zero of="$WORK/p2.ext4" bs=512 count="$P2_SECS" status=none
+  mkfs.ext4 -q -F -L rootfs "$WORK/p2.ext4" >/dev/null 2>&1
+  python3 - "$PDIR/uksd0" "$WORK/p1.fat" "$WORK/p2.ext4" "$P1_START" "$P1_SECS" "$P2_START" "$P2_SECS" <<'PY'
+import struct, sys
+img,p1,p2,s1,n1,s2,n2 = sys.argv[1], sys.argv[2], sys.argv[3], *map(int, sys.argv[4:8])
+with open(img,'r+b') as o:
+    with open(p1,'rb') as f: o.seek(s1*512); o.write(f.read())
+    with open(p2,'rb') as f: o.seek(s2*512); o.write(f.read())
+    def ent(boot,t,st,sc): return struct.pack('<B3sB3sII',boot,b'\xfe\xff\xff',t,b'\xfe\xff\xff',st,sc)
+    o.seek(0x1BE); o.write(ent(0x80,0x0C,s1,n1)); o.write(ent(0x00,0x83,s2,n2)); o.write(b'\0'*32)
+    o.seek(0x1FE); o.write(b'\x55\xaa')
+PY
+  R=$RANDOM; PFSOCK="io.neoterm.fs.p$R"
+  UKFSD_DEVDIR="$PDIR/" "$WORK/ukfsd" "$PFSOCK" >"$WORK/ukfsd_parts.log" 2>&1 &
+  PIDS="$PIDS $!"; sleep 0.4
+  if timeout 40 python3 "$HERE/ukfsd_parts.py" "$PFSOCK" > "$WORK/parts.out" 2>&1; then
+    sed 's/^/    /' "$WORK/parts.out"; ok "partition table: PARTS + mount uksd0p1 (FAT) + uksd0p2 (ext4)"
+  else
+    sed 's/^/    /' "$WORK/parts.out"; bad "partition table support"
+  fi
+else
+  skip "partition table test" "no ukfsd / mkfs.vfat / mkfs.ext4 / mcopy / python3"
+fi
+
 # ── 2. ukfsd + io.neoterm.fs/block end-to-end ─────────────────────────────────
 if [ -x "$WORK/ukfsd" ] && [ -n "$IMG" ] && have python3; then
   cp "$IMG" "$WORK/e2e.img"
