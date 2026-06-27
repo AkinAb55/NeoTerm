@@ -45,7 +45,7 @@ fused_t *fused_new(int chan_fd, uint32_t uid, uint32_t gid);
  */
 void fused_set_io(fused_t *f,
                   int (*send)(void *ctx, const void *buf, size_t len),
-                  int (*recv)(void *ctx, void *buf, size_t cap),
+                  int (*recv)(void *ctx, void *buf, size_t cap, uint64_t unique),
                   void *ctx);
 
 /* FUSE_INIT handshake: negotiate version/flags with the daemon. Must be called

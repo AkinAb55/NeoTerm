@@ -27,6 +27,7 @@ static int uk_fs_on(void)
 static void uk_dbg_line(const char *line);
 static void uk_dbg(Tracee *tracee, const char *line);   /* fwd (defined below) */
 static int  ukfs_tgid(int tid);                          /* fwd (defined below) */
+static void ukfs_canon(const char *in, char *out, size_t osz);  /* fwd (defined below) */
 
 /* ---- io.neoterm.fs connections — one MOUNT per connection, one connection per
  * mounted partition. A multi-partition device (e.g. a Raspberry Pi card: FAT boot
@@ -89,17 +90,23 @@ static fused_t *fuse_active(void)
 
 #define UK_NFCH 8
 #define UK_FUSE_MSGCAP (132 * 1024)   /* >= fused's FUSED_MSGCAP (one FUSE message) */
-/* One FUSE channel: the guest /dev/fuse fd + a single in-flight request/reply
- * (fused is synchronous: at most one outstanding message each way). */
+/* One FUSE channel, MULTIPLEXED: several processes can use one FUSE mount at once
+ * (e.g. rpi-imager + lsblk both read the squashfs), and the redirect's event-loop
+ * pump interleaves their ops on the SAME engine. So we queue outstanding requests
+ * (rq, FIFO) and match the daemon's replies to the waiting op by `unique` (rp),
+ * exactly as the kernel FUSE driver multiplexes — no crossed/clobbered messages. */
+#define UK_FQ 32
+struct ukfmsg { int used; uint64_t uniq; uint64_t seq; unsigned char *buf; int len; };
 struct ukfch {
 	int used, pid, fd;
 	fused_t *eng;
-	unsigned char *req; int reqlen, req_ready;
-	unsigned char *rep; int replen, rep_ready;
-	/* The daemon's read(/dev/fuse) is "parked" (left stopped) when no request is
-	 * pending, so the single-threaded tracer doesn't deadlock; it is resumed by
-	 * fch_send when an accessor produces a request. dvec = iovcnt for a parked
-	 * readv(), or -1 for a plain read(). */
+	struct ukfmsg rq[UK_FQ];   /* pending requests (oldest seq served first) */
+	struct ukfmsg rp[UK_FQ];   /* replies, claimed by matching unique */
+	uint64_t seq;
+	/* The daemon's read(/dev/fuse) is "parked" (left stopped) when the request
+	 * queue is empty, so the single-threaded tracer doesn't deadlock; it is resumed
+	 * when an accessor enqueues a request. dvec = iovcnt for a parked readv(), -1
+	 * for a plain read(). */
 	Tracee *dmn; word_t dbuf; int dcnt; int dvec; int parked;
 	char marker[256];   /* host path the /dev/fuse fd resolves to (survives fork) */
 };
@@ -118,6 +125,10 @@ extern int uknl_pump_one(void);
  * restart so it stays put until fch_send wakes it. The redirect sets this; the
  * patched restart sites (event_loop + pump_one) consult uknl_fuse_take_park(). */
 static int g_fuse_park_pid = 0;
+/* Latched once the root (session-leader) tracee exits: from then on a daemon read
+ * that finds no request must NOT park (nobody will ever wake it) — it gets EOF so
+ * the server exits. Closes the race where a daemon re-parks just after the drain. */
+static int g_fuse_root_gone = 0;
 int uknl_fuse_take_park(int pid);
 int uknl_fuse_take_park(int pid)
 {
@@ -140,21 +151,71 @@ static void fch_scatter(Tracee *t, word_t a2, int vec, const unsigned char *src,
 	}
 }
 
-/* Deliver one request to a parked daemon's pending read() and resume it. */
-static void fch_wake_daemon(struct ukfch *ch)
+/* fuse_in_header / fuse_out_header both carry `unique` at byte offset 8. */
+static uint64_t fch_uniq(const unsigned char *b, int len)
+{
+	uint64_t u = 0; if (len >= 16) memcpy(&u, b + 8, 8); return u;
+}
+
+/* Index of the oldest queued request (lowest seq), or -1 if none. */
+static int fch_oldest_rq(struct ukfch *ch)
+{
+	int best = -1; uint64_t bs = ~0ULL;
+	for (int i = 0; i < UK_FQ; i++)
+		if (ch->rq[i].used && ch->rq[i].seq < bs) { bs = ch->rq[i].seq; best = i; }
+	return best;
+}
+
+/* Deliver the oldest queued request to a parked daemon read() and resume it. */
+static void fch_deliver_parked(struct ukfch *ch)
 {
 	if (!ch->parked || !ch->dmn) return;
-	size_t n = (size_t) ch->reqlen; if (n > (size_t) ch->dcnt) n = (size_t) ch->dcnt;
-	fch_scatter(ch->dmn, ch->dbuf, ch->dvec, ch->req, n);
+	int i = fch_oldest_rq(ch);
+	if (i < 0) return;
+	struct ukfmsg *m = &ch->rq[i];
+	size_t n = (size_t) m->len; if (n > (size_t) ch->dcnt) n = (size_t) ch->dcnt;
+	fch_scatter(ch->dmn, ch->dbuf, ch->dvec, m->buf, n);
 	poke_reg(ch->dmn, SYSARG_RESULT, (word_t) n);
 	set_sysnum(ch->dmn, PR_void);
-	/* The read's exit-restore copies the result from the MODIFIED snapshot (see
-	 * translate_syscall_exit's PR_void path), so reflect PR_void+result there. */
+	/* The read's exit-restore copies the result from the MODIFIED snapshot. */
 	save_current_regs(ch->dmn, MODIFIED);
-	ch->req_ready = 0; ch->parked = 0;
+	free(m->buf); m->buf = NULL; m->used = 0;
+	ch->parked = 0;
 	Tracee *d = ch->dmn; ch->dmn = NULL;
-	(void) push_specific_regs(d, 1);   /* flush PR_void + result to the tracee */
+	(void) push_specific_regs(d, 1);
 	(void) restart_tracee(d, 0);
+}
+
+/* Resume a parked daemon read() with EOF (0 bytes). libfuse's session loop treats
+ * a zero-length read from /dev/fuse as "channel closed" and exits, so the daemon
+ * process can terminate. Without this a daemonized FUSE server left parked
+ * (ptrace-stopped, never resumed) lingers forever and blocks proot from exiting —
+ * the guest terminal won't restart. Called on unmount. */
+static void fch_resume_eof(struct ukfch *ch)
+{
+	if (!ch->parked || !ch->dmn) return;
+	poke_reg(ch->dmn, SYSARG_RESULT, 0);
+	set_sysnum(ch->dmn, PR_void);
+	save_current_regs(ch->dmn, MODIFIED);
+	ch->parked = 0;
+	Tracee *d = ch->dmn; ch->dmn = NULL;
+	(void) push_specific_regs(d, 1);
+	(void) restart_tracee(d, 0);
+}
+
+/* Resume EVERY parked FUSE daemon with EOF. Called when the root (session-leader)
+ * tracee exits: a daemonized FUSE server (rpi-imager's squashfuse, sshfs -o
+ * daemon, …) that is still parked in read(/dev/fuse) would otherwise stay
+ * ptrace-stopped forever, so proot's event loop never sees ECHILD and never
+ * exits — the terminal hangs and won't restart. EOF makes libfuse leave its
+ * session loop and the server process exit, so proot can finish. */
+void uknl_fuse_drain_parked(void);
+void uknl_fuse_drain_parked(void)
+{
+	g_fuse_root_gone = 1;          /* any later park -> EOF (see read path) */
+	for (int i = 0; i < UK_NFCH; i++)
+		if (g_fch[i].used && g_fch[i].parked && g_fch[i].dmn)
+			fch_resume_eof(&g_fch[i]);
 }
 
 static struct ukfch *fch_by_fd(int pid, int fd)
@@ -162,6 +223,23 @@ static struct ukfch *fch_by_fd(int pid, int fd)
 	for (int i = 0; i < UK_NFCH; i++)
 		if (g_fch[i].used && g_fch[i].pid == pid && g_fch[i].fd == fd) return &g_fch[i];
 	return NULL;
+}
+
+/* True iff `pid` belongs to a FUSE daemon's thread group (it owns a channel).
+ * The re-entrant pump (fch_recv) must advance ONLY the daemon while an accessor
+ * waits for a reply; every OTHER tracee's stop is deferred to the real event loop,
+ * else consuming e.g. a sibling's exit here breaks proot's parent-wait emulation
+ * and the guest shell's wait(2) hangs. Fast path on raw pid, then thread group. */
+int uknl_fuse_is_daemon(int pid);
+int uknl_fuse_is_daemon(int pid)
+{
+	for (int i = 0; i < UK_NFCH; i++)
+		if (g_fch[i].used && g_fch[i].eng && g_fch[i].pid == pid) return 1;
+	int tg = ukfs_tgid(pid);
+	if (tg != pid)
+		for (int i = 0; i < UK_NFCH; i++)
+			if (g_fch[i].used && g_fch[i].eng && g_fch[i].pid == tg) return 1;
+	return 0;
 }
 
 /* readlink /proc/<tid>/fd/<fd> -> host path (or "" on failure). */
@@ -201,27 +279,39 @@ static struct ukfch *fch_resolve(Tracee *tracee, int fd)
 	return NULL;
 }
 
-/* fused transport: store one request for the daemon; if the daemon is parked in
- * a blocking read(), deliver it and resume the daemon right away. */
+/* fused transport: enqueue one request; if the daemon is parked in a blocking
+ * read(), hand it the oldest queued request and resume it. */
 static int fch_send(void *c, const void *buf, size_t len)
 {
 	struct ukfch *ch = c;
 	if (len > UK_FUSE_MSGCAP) return -EIO;
-	memcpy(ch->req, buf, len); ch->reqlen = (int) len; ch->req_ready = 1; ch->rep_ready = 0;
-	if (ch->parked) fch_wake_daemon(ch);
+	int i; for (i = 0; i < UK_FQ; i++) if (!ch->rq[i].used) break;
+	if (i == UK_FQ) return -EIO;                       /* request queue full */
+	unsigned char *b = malloc(len);
+	if (!b) return -ENOMEM;
+	memcpy(b, buf, len);
+	ch->rq[i].used = 1; ch->rq[i].buf = b; ch->rq[i].len = (int) len;
+	ch->rq[i].uniq = fch_uniq(buf, (int) len); ch->rq[i].seq = ++ch->seq;
+	if (ch->parked) fch_deliver_parked(ch);
 	return (int) len;
 }
-/* fused transport: wait for the daemon's write() reply, pumping so it can run.
- * g_am is global and the pump may serve another op, so save/restore it. */
-static int fch_recv(void *c, void *buf, size_t cap)
+/* fused transport: wait for the daemon's reply that matches `unique`, pumping the
+ * loop so the daemon (and other ops) run. g_am is global and the pump may serve
+ * another op, so save/restore it. */
+static int fch_recv(void *c, void *buf, size_t cap, uint64_t unique)
 {
 	struct ukfch *ch = c;
 	int saved = g_am;
-	while (!ch->rep_ready) { if (uknl_pump_one() < 0) { g_am = saved; return -EIO; } }
-	g_am = saved;
-	int n = ch->replen; if ((size_t) n > cap) n = (int) cap;
-	memcpy(buf, ch->rep, n); ch->rep_ready = 0;
-	return n;
+	for (;;) {
+		for (int i = 0; i < UK_FQ; i++)
+			if (ch->rp[i].used && ch->rp[i].uniq == unique) {
+				int n = ch->rp[i].len; if ((size_t) n > cap) n = (int) cap;
+				memcpy(buf, ch->rp[i].buf, n);
+				free(ch->rp[i].buf); ch->rp[i].buf = NULL; ch->rp[i].used = 0;
+				g_am = saved; return n;
+			}
+		if (uknl_pump_one() < 0) { g_am = saved; return -EIO; }
+	}
 }
 
 /* enter: remember this thread is opening /dev/fuse (NO morph; the marker open
@@ -244,11 +334,10 @@ static void uknl_fuse_open_exit(Tracee *tracee)
 	if (!ch) for (int i = 0; i < UK_NFCH; i++) if (!g_fch[i].used) { ch = &g_fch[i]; break; }
 	if (!ch) return;
 	if (ch->eng) fused_destroy(ch->eng);
-	free(ch->req); free(ch->rep);
+	for (int i = 0; i < UK_FQ; i++) { free(ch->rq[i].buf); free(ch->rp[i].buf); }
 	memset(ch, 0, sizeof *ch);
-	ch->req = malloc(UK_FUSE_MSGCAP); ch->rep = malloc(UK_FUSE_MSGCAP);
-	ch->eng = (ch->req && ch->rep) ? fused_new(-1, 0, 0) : NULL;  /* fd unused: io is the channel */
-	if (!ch->eng) { free(ch->req); free(ch->rep); memset(ch, 0, sizeof *ch); return; }
+	ch->eng = fused_new(-1, 0, 0);                     /* fd unused: io is the channel */
+	if (!ch->eng) { memset(ch, 0, sizeof *ch); return; }
 	fused_set_io(ch->eng, fch_send, fch_recv, ch);
 	ch->used = 1; ch->pid = pid; ch->fd = (int) fd;
 	fch_fdpath(tracee->pid, (int) fd, ch->marker, sizeof ch->marker);   /* for fork adoption */
@@ -282,32 +371,43 @@ static bool uknl_fuse_chan_io(Tracee *tracee, word_t nr)
 				cap += (size_t) iov[1];
 			}
 		} else cap = a3;
-		if (ch->req_ready) {
-			size_t n = (size_t) ch->reqlen; if (n > cap) n = cap;
-			fch_scatter(tracee, a2, is_vec ? (int) a3 : -1, ch->req, n);
-			ch->req_ready = 0;
+		int qi = fch_oldest_rq(ch);
+		if (qi >= 0) {
+			struct ukfmsg *m = &ch->rq[qi];
+			size_t n = (size_t) m->len; if (n > cap) n = cap;
+			fch_scatter(tracee, a2, is_vec ? (int) a3 : -1, m->buf, n);
+			free(m->buf); m->buf = NULL; m->used = 0;
 			poke_reg(tracee, SYSARG_RESULT, (word_t) n); set_sysnum(tracee, PR_void); return true;
 		}
-		/* no request yet: PARK this read until fch_send delivers one. */
+		/* Root already exited: nobody will ever send a request, so do NOT park
+		 * (it would never be woken). Hand the daemon EOF so libfuse exits. */
+		if (g_fuse_root_gone) {
+			poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
+		}
+		/* queue empty: PARK this read until a request is enqueued. */
 		ch->dmn = tracee; ch->dbuf = a2; ch->dcnt = (int) cap; ch->parked = 1; ch->dvec = is_vec ? (int) a3 : -1;
 		g_fuse_park_pid = tracee->pid;
 		return true;
 	}
-	/* write: the daemon's reply — gather into ch->rep */
+	/* write: the daemon's reply — gather, then queue keyed by unique */
+	unsigned char *rb = malloc(UK_FUSE_MSGCAP);
+	if (!rb) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) -ENOMEM); set_sysnum(tracee, PR_void); return true; }
 	size_t total = 0;
 	if (is_vec) {
 		for (size_t i = 0; i < a3; i++) {
 			word_t iov[2];
 			if (read_data(tracee, iov, a2 + i * 2 * sizeof(word_t), 2 * sizeof(word_t)) < 0) break;
 			size_t chunk = (size_t) iov[1]; if (chunk > UK_FUSE_MSGCAP - total) chunk = UK_FUSE_MSGCAP - total;
-			if (chunk) read_data(tracee, ch->rep + total, iov[0], chunk);
+			if (chunk) read_data(tracee, rb + total, iov[0], chunk);
 			total += chunk;
 		}
 	} else {
 		total = a3; if (total > UK_FUSE_MSGCAP) total = UK_FUSE_MSGCAP;
-		if (read_data(tracee, ch->rep, a2, total) < 0) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) -EFAULT); set_sysnum(tracee, PR_void); return true; }
+		if (read_data(tracee, rb, a2, total) < 0) { free(rb); poke_reg(tracee, SYSARG_RESULT, (word_t)(long) -EFAULT); set_sysnum(tracee, PR_void); return true; }
 	}
-	ch->replen = (int) total; ch->rep_ready = 1;
+	int ri; for (ri = 0; ri < UK_FQ; ri++) if (!ch->rp[ri].used) break;
+	if (ri == UK_FQ) free(rb);   /* reply queue full: drop (op will -EIO/retry) */
+	else { ch->rp[ri].used = 1; ch->rp[ri].buf = rb; ch->rp[ri].len = (int) total; ch->rp[ri].uniq = fch_uniq(rb, (int) total);}
 	/* return the count the daemon asked to write (its full reply) */
 	{ size_t reported = is_vec ? total : a3; poke_reg(tracee, SYSARG_RESULT, (word_t) reported); }
 	set_sysnum(tracee, PR_void); return true;
@@ -417,7 +517,11 @@ static void ukfs_unmount_slot(int i)
 		fused_destroy(g_m[i].fuse);
 		int ci = g_m[i].fuse_chan;
 		if (ci >= 0 && ci < UK_NFCH && g_fch[ci].used && g_fch[ci].eng == g_m[i].fuse) {
-			free(g_fch[ci].req); free(g_fch[ci].rep);
+			/* fused_destroy sent FUSE_DESTROY; the daemon has looped back into a
+			 * blocking read() and re-parked. Hand it EOF so libfuse exits and the
+			 * server process dies instead of lingering ptrace-stopped. */
+			fch_resume_eof(&g_fch[ci]);
+			for (int k = 0; k < UK_FQ; k++) { free(g_fch[ci].rq[k].buf); free(g_fch[ci].rp[k].buf); }
 			memset(&g_fch[ci], 0, sizeof g_fch[ci]);
 		}
 		memset(&g_m[i], 0, sizeof g_m[i]); g_m[i].sock = -1;
@@ -547,11 +651,26 @@ static int ukfs_mount_register(const char *src, const char *tgt)
 	return ukm_register(tgt, token, 0, 0, 0);         /* token form: ukfsd resolves the partition */
 }
 
-/* Free the mount slot whose vmount == tgt (real guest umount). Returns 1 if found. */
-static int ukfs_umount_target(const char *tgt)
+/* Free the mount slot whose vmount == the umount target. Returns 1 if found.
+ * The raw target may be RELATIVE: fusermount(1) chdir()s to the mountpoint's
+ * parent and umount2()s the basename (e.g. "fmnt"), so resolve it against the
+ * tracee's guest cwd and canonicalise before matching the registered vmount
+ * (an absolute guest path). Without this a FUSE unmount never matched and the
+ * daemon was left mounted + parked, hanging proot at shutdown. */
+static int ukfs_umount_target(Tracee *tracee, const char *raw)
 {
+	char abs[PATH_MAX], canon[PATH_MAX];
+	if (raw[0] == '/') {
+		snprintf(abs, sizeof abs, "%s", raw);
+	} else {
+		const char *cwd = (tracee && tracee->fs && tracee->fs->cwd) ? tracee->fs->cwd : "/";
+		snprintf(abs, sizeof abs, "%s/%s", cwd, raw);
+	}
+	ukfs_canon(abs, canon, sizeof canon);
 	for (int i = 0; i < UK_MAXM; i++)
-		if (g_m[i].used && strcmp(g_m[i].vmount, tgt) == 0) { ukfs_unmount_slot(i); if (g_am == i) g_am = -1; return 1; }
+		if (g_m[i].used && (strcmp(g_m[i].vmount, canon) == 0 || strcmp(g_m[i].vmount, raw) == 0)) {
+			ukfs_unmount_slot(i); if (g_am == i) g_am = -1; return 1;
+		}
 	return 0;
 }
 
@@ -1533,7 +1652,7 @@ static bool uknl_fs_umount_hook(Tracee *tracee)
 	char l[PATH_MAX + 64];
 	snprintf(l, sizeof l, "uk_fs: UMOUNT hook tgt='%s'\n", tgt);
 	uk_dbg(tracee, l);
-	return ukfs_umount_target(tgt) ? true : false;   /* not our mount point -> let proot handle */
+	return ukfs_umount_target(tracee, tgt) ? true : false;   /* not our mount point -> let proot handle */
 }
 
 #ifndef AT_FDCWD
@@ -1808,7 +1927,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		word_t ta = peek_reg(tracee, CURRENT, SYSARG_1);
 		char tgt[PATH_MAX];
 		if (!ta || read_string(tracee, tgt, ta, sizeof tgt) <= 0) return false;
-		if (!ukfs_umount_target(tgt)) return false;
+		if (!ukfs_umount_target(tracee, tgt)) return false;
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 		return true;

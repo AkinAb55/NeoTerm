@@ -51,15 +51,14 @@ struct fused {
 	/* path -> nodeid cache (root is implicit) */
 	struct fnode *nodes;
 	size_t        nnodes, capnodes;
-	unsigned char *msg;       /* reusable I/O buffer (FUSED_MSGCAP) */
 	int  (*io_send)(void *ctx, const void *buf, size_t len);   /* transport (proot), or NULL */
-	int  (*io_recv)(void *ctx, void *buf, size_t cap);
+	int  (*io_recv)(void *ctx, void *buf, size_t cap, uint64_t unique);
 	void  *io_ctx;
 };
 
 void fused_set_io(fused_t *f,
                   int (*send)(void *ctx, const void *buf, size_t len),
-                  int (*recv)(void *ctx, void *buf, size_t cap),
+                  int (*recv)(void *ctx, void *buf, size_t cap, uint64_t unique),
                   void *ctx)
 {
 	if (!f) return;
@@ -80,10 +79,13 @@ static int tx_send(fused_t *f, const void *buf, size_t len)
 	}
 }
 
-/* Receive one reply message into buf (<= cap). Returns bytes, or -errno. */
-static ssize_t tx_recv(fused_t *f, void *buf, size_t cap)
+/* Receive the reply for `unique` into buf (<= cap). Returns bytes, or -errno.
+ * The io transport (proot) multiplexes by unique so concurrent ops from several
+ * processes on one mount don't cross replies; the fd path (host test) is
+ * sequential and ignores `unique`. */
+static ssize_t tx_recv(fused_t *f, void *buf, size_t cap, uint64_t unique)
 {
-	if (f->io_recv) return f->io_recv(f->io_ctx, buf, cap);
+	if (f->io_recv) return f->io_recv(f->io_ctx, buf, cap, unique);
 	for (;;) {
 		ssize_t r = read(f->fd, buf, cap);
 		if (r < 0) { if (errno == EINTR) continue; return -errno; }
@@ -91,11 +93,13 @@ static ssize_t tx_recv(fused_t *f, void *buf, size_t cap)
 	}
 }
 
-/* ---- low-level request/reply ---- */
+/* ---- low-level request/reply ----
+ * RE-ENTRANT: each call uses its own heap message buffer (no shared f->msg), so
+ * an op suspended mid-round-trip (while the proot redirect pumps the event loop
+ * and another process issues a FUSE op on the SAME engine) doesn't clobber it. */
 
 /* Send (opcode,nodeid,in[inlen]); copy up to outcap reply-body bytes into out,
- * report the full body length in *outlen. Returns 0, or a negative errno (the
- * daemon's fuse_out_header.error, or a transport error). */
+ * report the full body length in *outlen. 0, or negative errno. */
 static int xfer(fused_t *f, uint32_t opcode, uint64_t nodeid,
                 const void *in, size_t inlen,
                 void *out, size_t outcap, size_t *outlen)
@@ -103,6 +107,8 @@ static int xfer(fused_t *f, uint32_t opcode, uint64_t nodeid,
 	if (outlen) *outlen = 0;
 	size_t total = sizeof(struct fuse_in_header) + inlen;
 	if (total > FUSED_MSGCAP) return -EINVAL;
+	unsigned char *m = malloc(FUSED_MSGCAP);
+	if (!m) return -ENOMEM;
 
 	struct fuse_in_header h;
 	memset(&h, 0, sizeof h);
@@ -110,42 +116,38 @@ static int xfer(fused_t *f, uint32_t opcode, uint64_t nodeid,
 	h.opcode = opcode;
 	h.unique = ++f->unique;
 	h.nodeid = nodeid;
-	h.uid = f->uid;
-	h.gid = f->gid;
-	h.pid = f->pid;
+	h.uid = f->uid; h.gid = f->gid; h.pid = f->pid;
+	memcpy(m, &h, sizeof h);
+	if (inlen) memcpy(m + sizeof h, in, inlen);
 
-	memcpy(f->msg, &h, sizeof h);
-	if (inlen) memcpy(f->msg + sizeof h, in, inlen);
-
-	int sr = tx_send(f, f->msg, total);
-	if (sr < 0) return sr;
-	ssize_t r = tx_recv(f, f->msg, FUSED_MSGCAP);
-	if (r < 0) return (int) r;
-	if ((size_t) r < sizeof(struct fuse_out_header)) return -EIO;
+	int sr = tx_send(f, m, total);
+	if (sr < 0) { free(m); return sr; }
+	ssize_t r = tx_recv(f, m, FUSED_MSGCAP, h.unique);
+	if (r < 0) { free(m); return (int) r; }
+	if ((size_t) r < sizeof(struct fuse_out_header)) { free(m); return -EIO; }
 
 	struct fuse_out_header oh;
-	memcpy(&oh, f->msg, sizeof oh);
-	if (oh.error) {
-		/* fuse_out_header.error is a negative errno already. */
-		return oh.error < 0 ? oh.error : -oh.error;
-	}
+	memcpy(&oh, m, sizeof oh);
+	if (oh.error) { int e = oh.error < 0 ? oh.error : -oh.error; free(m); return e; }
 	size_t body = (size_t) r - sizeof oh;
-	if (out && body) {
-		size_t n = body < outcap ? body : outcap;
-		memcpy(out, f->msg + sizeof oh, n);
-	}
+	if (out && body) { size_t n = body < outcap ? body : outcap; memcpy(out, m + sizeof oh, n); }
 	if (outlen) *outlen = body;
+	free(m);
 	return 0;
 }
 
-/* Fire-and-forget request: write only, never wait for a reply. Used for the
- * replyless opcodes (FUSE_FORGET) and at teardown (FUSE_DESTROY, after which we
- * close the channel and let the daemon see EOF). */
+/* xfer alias for variable-size replies (READ/READDIR/READLINK) — same as xfer;
+ * the caller supplies the output buffer (no returned pointer into shared state). */
+#define xfer_var xfer
+
+/* Fire-and-forget request (replyless: FUSE_FORGET; teardown: FUSE_DESTROY). */
 static void xfer_noreply(fused_t *f, uint32_t opcode, uint64_t nodeid,
                          const void *in, size_t inlen)
 {
 	size_t total = sizeof(struct fuse_in_header) + inlen;
 	if (total > FUSED_MSGCAP) return;
+	unsigned char *m = malloc(total);
+	if (!m) return;
 	struct fuse_in_header h;
 	memset(&h, 0, sizeof h);
 	h.len = (uint32_t) total;
@@ -153,52 +155,14 @@ static void xfer_noreply(fused_t *f, uint32_t opcode, uint64_t nodeid,
 	h.unique = ++f->unique;
 	h.nodeid = nodeid;
 	h.uid = f->uid; h.gid = f->gid; h.pid = f->pid;
-	memcpy(f->msg, &h, sizeof h);
-	if (inlen) memcpy(f->msg + sizeof h, in, inlen);
-	(void) tx_send(f, f->msg, total);
-}
-
-/* Variant that hands back a pointer INTO the reusable buffer (for variable-size
- * replies like READ data / READDIR streams). Valid until the next xfer call. */
-static int xfer_ref(fused_t *f, uint32_t opcode, uint64_t nodeid,
-                    const void *in, size_t inlen,
-                    const unsigned char **body, size_t *bodylen)
-{
-	*body = NULL; *bodylen = 0;
-	size_t total = sizeof(struct fuse_in_header) + inlen;
-	if (total > FUSED_MSGCAP) return -EINVAL;
-
-	struct fuse_in_header h;
-	memset(&h, 0, sizeof h);
-	h.len = (uint32_t) total;
-	h.opcode = opcode;
-	h.unique = ++f->unique;
-	h.nodeid = nodeid;
-	h.uid = f->uid; h.gid = f->gid; h.pid = f->pid;
-	memcpy(f->msg, &h, sizeof h);
-	if (inlen) memcpy(f->msg + sizeof h, in, inlen);
-
-	int sr = tx_send(f, f->msg, total);
-	if (sr < 0) return sr;
-	ssize_t r = tx_recv(f, f->msg, FUSED_MSGCAP);
-	if (r < 0) return (int) r;
-	if ((size_t) r < sizeof(struct fuse_out_header)) return -EIO;
-	struct fuse_out_header oh;
-	memcpy(&oh, f->msg, sizeof oh);
-	if (oh.error) return oh.error < 0 ? oh.error : -oh.error;
-	*body = f->msg + sizeof oh;
-	*bodylen = (size_t) r - sizeof oh;
-	return 0;
+	memcpy(m, &h, sizeof h);
+	if (inlen) memcpy(m + sizeof h, in, inlen);
+	(void) tx_send(f, m, total);
+	free(m);
 }
 
 /* ---- node cache ---- */
 
-static uint64_t cache_get(fused_t *f, const char *path)
-{
-	for (size_t i = 0; i < f->nnodes; i++)
-		if (strcmp(f->nodes[i].path, path) == 0) return f->nodes[i].nodeid;
-	return 0;
-}
 
 static void cache_put(fused_t *f, const char *path, uint64_t nodeid)
 {
@@ -328,11 +292,11 @@ restart:
 		cache_put(f, child, eo.nodeid);
 
 		if ((eo.attr.mode & 0170000) == 0120000 /*S_IFLNK*/ && (!is_last || follow_final)) {
-			const unsigned char *body; size_t bl;
-			rc = xfer_ref(f, FUSE_READLINK, eo.nodeid, NULL, 0, &body, &bl);
+			char tgt[4096]; size_t bl;
+			rc = xfer_var(f, FUSE_READLINK, eo.nodeid, NULL, 0, tgt, sizeof tgt - 1, &bl);
 			if (rc) return rc;
-			char tgt[4096]; size_t tl = bl < sizeof tgt - 1 ? bl : sizeof tgt - 1;
-			memcpy(tgt, body, tl); tgt[tl] = '\0';
+			size_t tl = bl < sizeof tgt - 1 ? bl : sizeof tgt - 1;
+			tgt[tl] = '\0';
 			char newp[8192];
 			if (tgt[0] == '/') snprintf(newp, sizeof newp, "%s/%s", tgt, p);
 			else snprintf(newp, sizeof newp, "%s/%s/%s", curdir, tgt, p);
@@ -363,8 +327,6 @@ fused_t *fused_new(int chan_fd, uint32_t uid, uint32_t gid)
 {
 	fused_t *f = calloc(1, sizeof *f);
 	if (!f) return NULL;
-	f->msg = malloc(FUSED_MSGCAP);
-	if (!f->msg) { free(f); return NULL; }
 	f->fd = chan_fd;
 	f->uid = uid; f->gid = gid;
 	f->pid = (uint32_t) getpid();
@@ -410,7 +372,6 @@ void fused_destroy(fused_t *f)
 	}
 	for (size_t i = 0; i < f->nnodes; i++) free(f->nodes[i].path);
 	free(f->nodes);
-	free(f->msg);
 	free(f);
 }
 
@@ -437,11 +398,10 @@ int fused_readlink(fused_t *f, const char *path, char *buf, size_t cap)
 	uint64_t nid;
 	int rc = resolve_x(f, path, &nid, 0);   /* don't deref the final symlink */
 	if (rc) return rc;
-	const unsigned char *body; size_t bl;
-	rc = xfer_ref(f, FUSE_READLINK, nid, NULL, 0, &body, &bl);
+	size_t bl;
+	rc = xfer_var(f, FUSE_READLINK, nid, NULL, 0, buf, cap - 1, &bl);
 	if (rc) return rc;
 	if (bl >= cap) bl = cap - 1;
-	memcpy(buf, body, bl);
 	buf[bl] = '\0';
 	return 0;
 }
@@ -509,11 +469,10 @@ int fused_read(fused_t *f, const char *path, uint64_t fh, void *buf, size_t size
 	in.fh = fh;
 	in.offset = (uint64_t) off;
 	in.size = (uint32_t) size;
-	const unsigned char *body; size_t bl;
-	rc = xfer_ref(f, FUSE_READ, nid, &in, sizeof in, &body, &bl);
+	size_t bl;
+	rc = xfer_var(f, FUSE_READ, nid, &in, sizeof in, buf, size, &bl);
 	if (rc) return rc;
 	if (bl > size) bl = size;
-	memcpy(buf, body, bl);
 	return (int) bl;
 }
 
@@ -523,19 +482,17 @@ int fused_write(fused_t *f, const char *path, uint64_t fh, const void *buf, size
 	int rc = resolve(f, path, &nid);
 	if (rc) return rc;
 	if (size > f->max_write) size = f->max_write;
-	/* fuse_write_in header immediately followed by the data */
-	unsigned char in[sizeof(struct fuse_write_in)];
+	if (sizeof(struct fuse_in_header) + sizeof(struct fuse_write_in) + size > FUSED_MSGCAP)
+		size = FUSED_MSGCAP - sizeof(struct fuse_in_header) - sizeof(struct fuse_write_in);
 	struct fuse_write_in wi;
 	memset(&wi, 0, sizeof wi);
 	wi.fh = fh;
 	wi.offset = (uint64_t) off;
 	wi.size = (uint32_t) size;
-	memcpy(in, &wi, sizeof wi);
 
-	/* assemble header+data in f->msg directly via a temp combine */
-	size_t total = sizeof(struct fuse_in_header) + sizeof wi + size;
-	if (total > FUSED_MSGCAP) { size = FUSED_MSGCAP - sizeof(struct fuse_in_header) - sizeof wi; wi.size = (uint32_t) size; memcpy(in, &wi, sizeof wi); }
-	/* We need a single packet: build it manually (xfer can't append a 2nd body). */
+	/* one packet: header + fuse_write_in + data (own buffer, re-entrant) */
+	unsigned char *m = malloc(FUSED_MSGCAP);
+	if (!m) return -ENOMEM;
 	struct fuse_in_header h;
 	memset(&h, 0, sizeof h);
 	h.len = (uint32_t)(sizeof h + sizeof wi + size);
@@ -543,19 +500,20 @@ int fused_write(fused_t *f, const char *path, uint64_t fh, const void *buf, size
 	h.unique = ++f->unique;
 	h.nodeid = nid;
 	h.uid = f->uid; h.gid = f->gid; h.pid = f->pid;
-	memcpy(f->msg, &h, sizeof h);
-	memcpy(f->msg + sizeof h, in, sizeof wi);
-	memcpy(f->msg + sizeof h + sizeof wi, buf, size);
-	int sr = tx_send(f, f->msg, h.len);
-	if (sr < 0) return sr;
-	ssize_t r = tx_recv(f, f->msg, FUSED_MSGCAP);
-	if (r < 0) return (int) r;
-	if ((size_t) r < sizeof(struct fuse_out_header)) return -EIO;
-	struct fuse_out_header oh; memcpy(&oh, f->msg, sizeof oh);
-	if (oh.error) return oh.error < 0 ? oh.error : -oh.error;
+	memcpy(m, &h, sizeof h);
+	memcpy(m + sizeof h, &wi, sizeof wi);
+	memcpy(m + sizeof h + sizeof wi, buf, size);
+	int sr = tx_send(f, m, h.len);
+	if (sr < 0) { free(m); return sr; }
+	ssize_t r = tx_recv(f, m, FUSED_MSGCAP, h.unique);
+	if (r < 0) { free(m); return (int) r; }
+	if ((size_t) r < sizeof(struct fuse_out_header)) { free(m); return -EIO; }
+	struct fuse_out_header oh; memcpy(&oh, m, sizeof oh);
+	if (oh.error) { int e = oh.error < 0 ? oh.error : -oh.error; free(m); return e; }
 	struct fuse_write_out wo;
-	if ((size_t) r - sizeof oh < sizeof wo) return -EIO;
-	memcpy(&wo, f->msg + sizeof oh, sizeof wo);
+	if ((size_t) r - sizeof oh < sizeof wo) { free(m); return -EIO; }
+	memcpy(&wo, m + sizeof oh, sizeof wo);
+	free(m);
 	return (int) wo.size;
 }
 
@@ -645,9 +603,10 @@ int fused_readdir(fused_t *f, const char *path,
 		rin.fh = dh;
 		rin.offset = off;
 		rin.size = 4096;
-		const unsigned char *body; size_t bl;
-		rc = xfer_ref(f, FUSE_READDIR, nid, &rin, sizeof rin, &body, &bl);
+		unsigned char dbuf[4096]; const unsigned char *body = dbuf; size_t bl;
+		rc = xfer_var(f, FUSE_READDIR, nid, &rin, sizeof rin, dbuf, sizeof dbuf, &bl);
 		if (rc) { ret = rc; break; }
+		if (bl > sizeof dbuf) bl = sizeof dbuf;
 		if (bl == 0) break;     /* end of stream */
 
 		size_t p = 0;

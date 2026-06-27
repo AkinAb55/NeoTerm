@@ -970,10 +970,34 @@ if 'uknl_pump_one' not in s:
     must('int event_loop()\n{' in s, "event.c event_loop anchor (fuse pump)")
     pump = (
         'extern int uknl_fuse_take_park(int pid);   /* FUSE: park a daemon read */\n'
-        '/* NeoTerm FUSE: handle ONE other tracee stop, exactly like the body of\n'
-        ' * event_loop(). The current tracee is mid-handling (not restarted), so\n'
-        ' * waitpid never returns it here. Used so an accessor waiting on a FUSE reply\n'
-        ' * lets the daemon run (and vice-versa). Returns 0, or -1 if no children. */\n'
+        'extern void uknl_fuse_drain_parked(void);  /* FUSE: EOF all parked daemons */\n'
+        'extern int uknl_fuse_is_daemon(int pid);   /* FUSE: pid owns a channel? */\n'
+        '\n'
+        '/* Deferred tracee stops. While the re-entrant FUSE pump (uknl_pump_one) is\n'
+        ' * advancing the daemon so an accessor gets its reply, every NON-daemon stop\n'
+        ' * waitpid() returns is stashed here verbatim and replayed by event_loop(),\n'
+        ' * so proot\'s process/wait/zombie emulation sees those events exactly as if it\n'
+        ' * had waited them itself. Without this, consuming e.g. a sibling process\'s\n'
+        ' * exit inside the pump loses the guest parent\'s wait(2) wakeup and it hangs.\n'
+        ' * Each stashed tracee is left stopped (not restarted), so it has at most one\n'
+        ' * pending event and per-tracee ordering is preserved. */\n'
+        '#define UK_STASH_MAX 512\n'
+        'static struct { pid_t pid; int status; } uk_stash[UK_STASH_MAX];\n'
+        'static int uk_stash_n = 0;\n'
+        'static int uknl_stash_push(pid_t pid, int status)\n{\n'
+        '\tif (uk_stash_n >= UK_STASH_MAX) return -1;\n'
+        '\tuk_stash[uk_stash_n].pid = pid; uk_stash[uk_stash_n].status = status; uk_stash_n++;\n'
+        '\treturn 0;\n}\n'
+        'static int uknl_stash_pop(pid_t *pid, int *status)\n{\n'
+        '\tif (uk_stash_n == 0) return 0;\n'
+        '\t*pid = uk_stash[0].pid; *status = uk_stash[0].status;\n'
+        '\tmemmove(&uk_stash[0], &uk_stash[1], (size_t)(--uk_stash_n) * sizeof uk_stash[0]);\n'
+        '\treturn 1;\n}\n'
+        '\n'
+        '/* NeoTerm FUSE: advance the FUSE daemon by ONE stop so an accessor waiting on\n'
+        ' * a reply makes progress. Any other tracee that stops meanwhile is stashed for\n'
+        ' * event_loop() (see above) rather than handled here. Returns 0, or -1 if no\n'
+        ' * children remain. */\n'
         'int uknl_pump_one(void);\n'
         'int uknl_pump_one(void)\n{\n'
         '\tint tracee_status;\n'
@@ -982,6 +1006,11 @@ if 'uknl_pump_one' not in s:
         '\tfor (;;) {\n'
         '\t\tpid = waitpid(-1, &tracee_status, __WALL);\n'
         '\t\tif (pid < 0) { if (errno == EINTR) continue; return -1; }\n'
+        '\t\t/* Only the daemon is advanced here; defer everyone else. */\n'
+        '\t\tif (!uknl_fuse_is_daemon((int) pid)) {\n'
+        '\t\t\tif (uknl_stash_push(pid, tracee_status) == 0) continue;  /* deferred */\n'
+        '\t\t\t/* stash full: fall through and handle inline (degraded, rare) */\n'
+        '\t\t}\n'
         '\t\tbreak;\n'
         '\t}\n'
         '\tTracee *t = get_tracee(NULL, pid, true);\n'
@@ -995,12 +1024,26 @@ if 'uknl_pump_one' not in s:
         '\treturn 0;\n}\n\n'
     )
     s = s.replace('int event_loop()\n{', pump + 'int event_loop()\n{', 1)
+    # Main loop: replay any stops the FUSE pump deferred, before waiting for new ones.
+    wait_anchor = ('\t\t/* Wait for the next tracee\'s stop. */\n'
+                   '\t\tpid = waitpid(-1, &tracee_status, __WALL);')
+    must(wait_anchor in s, "event.c main-loop waitpid anchor (fuse stash)")
+    s = s.replace(wait_anchor,
+                  '\t\t/* Wait for the next tracee\'s stop. FUSE: replay a stop the daemon\n'
+                  '\t\t * pump deferred (preserves wait/zombie semantics) before waiting anew. */\n'
+                  '\t\tif (!uknl_stash_pop(&pid, &tracee_status))\n'
+                  '\t\t\tpid = waitpid(-1, &tracee_status, __WALL);', 1)
     # Main loop: skip restart for a parked FUSE daemon read (resumed later by fch_send).
     ml_anchor = ('\t\tsignal = handle_tracee_event(tracee, tracee_status);\n'
                  '\t\t(void) restart_tracee(tracee, signal);')
     must(ml_anchor in s, "event.c main-loop restart anchor (fuse park)")
     s = s.replace(ml_anchor,
                   '\t\tsignal = handle_tracee_event(tracee, tracee_status);\n'
+                  '\t\t/* FUSE: when the root (session-leader, vpid 1) tracee exits, a\n'
+                  '\t\t * daemonized FUSE server still parked in read(/dev/fuse) would keep\n'
+                  '\t\t * proot alive forever (no ECHILD). EOF them so they exit too. */\n'
+                  '\t\tif ((WIFEXITED(tracee_status) || WIFSIGNALED(tracee_status)) && tracee->vpid == 1)\n'
+                  '\t\t\tuknl_fuse_drain_parked();\n'
                   '\t\tif (uknl_fuse_take_park((int) pid)) continue;   /* parked FUSE daemon read */\n'
                   '\t\t(void) restart_tracee(tracee, signal);', 1)
     wr(EV, s)
