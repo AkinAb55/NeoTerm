@@ -190,6 +190,25 @@ else
   skip "partition table test" "no ukfsd / mkfs.vfat / mkfs.ext4 / mcopy / python3"
 fi
 
+# ── 1f. fused: FUSE "kernel" engine vs a REAL libfuse3 daemon ─────────────────
+#        proot/patches/fused.c speaks the kernel side of the FUSE protocol
+#        (vendored UAPI fuse_kernel.h) so guest libfuse daemons (sshfs/rclone/…)
+#        work over our /dev/fuse. Validate it against an in-memory rw filesystem
+#        built on real libfuse3, driven over a socketpair via custom_io. ──
+if have cc && { pkg-config --exists fuse3 2>/dev/null || [ -f /usr/include/fuse3/fuse.h ]; }; then
+  FCF="$(pkg-config --cflags fuse3 2>/dev/null || true)"
+  FLB="$(pkg-config --libs fuse3 2>/dev/null || echo -lfuse3)"
+  if cc -Wall -Wextra -Wno-unused-parameter -I "$ROOT/proot/patches" $FCF \
+        "$HERE/fused_hello_test.c" "$ROOT/proot/patches/fused.c" -o "$WORK/fused_test" $FLB 2>"$WORK/o/fused.cc"; then
+    if timeout 30 "$WORK/fused_test" >"$WORK/fused.out" 2>/dev/null && grep -q "all checks passed" "$WORK/fused.out"; then
+      sed 's/^/    /' "$WORK/fused.out"
+      ok "fused: FUSE engine vs real libfuse3 (init/getattr/readdir/open/read/create/write/mkdir/truncate/unlink)"
+    else sed 's/^/    /' "$WORK/fused.out"; bad "fused: libfuse3 round-trip"; fi
+  else bad "fused: build vs libfuse3"; sed -n 1,6p "$WORK/o/fused.cc"; fi
+else
+  skip "fused FUSE engine test" "no cc / libfuse3-dev"
+fi
+
 # ── 2. ukfsd + io.neoterm.fs/block end-to-end ─────────────────────────────────
 if [ -x "$WORK/ukfsd" ] && [ -n "$IMG" ] && have python3; then
   cp "$IMG" "$WORK/e2e.img"
