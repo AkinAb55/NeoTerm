@@ -31,6 +31,9 @@ through standard Linux interfaces — without rooting the device.
 - **USB-serial** → hot-pluggable `/dev/ttyUSB*` (FTDI/CP210x/CH34x/PL2303/CDC-ACM).
 - **USB mass storage & disk images** → mount **vfat / exfat / ntfs3 / ext4** with
   partitions and **loop devices**, parsed entirely in userspace.
+- **FUSE in proot** → a working **`/dev/fuse`**, so userspace filesystems
+  (**sshfs, rclone**) and **AppImages** (e.g. **Raspberry Pi Imager**) run
+  unmodified — no root.
 - A modern, multi-tab terminal UI (ViewPager2 tabs, swipe + dot indicator,
   configurable cursor, extra-keys, color schemes, fonts).
 
@@ -189,6 +192,29 @@ syscall under it to that daemon.
   operate on them correctly.
 - Toggle under **Settings → General → USB storage**. See
   [`docs/USB_STORAGE_MOUNT.md`](docs/USB_STORAGE_MOUNT.md) for the architecture.
+
+## FUSE filesystems & AppImages
+
+A normal Linux `mount.fuse` needs `open("/dev/fuse")` + `mount(2)` as real root —
+neither is available under proot. NeoTerm gives the guest a **real, working
+`/dev/fuse`** so **unmodified libfuse programs just work**, no root.
+
+There is no kernel FUSE driver to talk to, so NeoTerm **plays the kernel**: the
+guest's libfuse daemon (sshfs, squashfuse, …) opens our `/dev/fuse` and runs its
+normal session loop, while a userspace FUSE engine inside proot speaks the FUSE
+wire protocol to it and serves the mountpoint to the rest of the distro.
+
+- **Userspace filesystems:** **sshfs** and **rclone mount** work — `sshfs
+  host:/path /mnt`, then read/write under `/mnt` as usual.
+- **AppImages:** type-2 AppImages mount their bundled squashfs via FUSE, so apps
+  like the **Raspberry Pi Imager** run straight from the `.AppImage` — including
+  its `lsblk`-based drive enumeration over `/dev/uksd0`.
+- **Concurrent & re-entrant:** several processes can use one FUSE mount at once
+  (e.g. the app plus a `lsblk` it spawns), and **multiple FUSE mounts** coexist.
+- **Clean lifecycle:** mounts are torn down when unmounted *or* when the owning
+  app exits/is interrupted, so repeated launch → quit → relaunch stays reliable.
+
+Nothing to toggle — it's part of the proot runtime whenever a distro is running.
 
 ## Terminal UI
 
