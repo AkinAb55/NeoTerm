@@ -101,11 +101,17 @@ object CameraBridge {
   @Volatile private var openH = 0
   @Volatile private var v4lFourcc = "MJPG"  // negotiated V4L2 pixel format
   @Volatile private var camRotation = 0     // sensor mount rotation, cached for caps/size mapping
+  @Volatile private var v4lStreaming = false // a V4L2 client is actively streaming
+  private val httpClients = AtomicInteger(0) // MJPEG-over-HTTP consumers (need rotated JPEG)
+  @Volatile private var ctrlWb = 1          // white balance (Camera2 AWB mode; 1 = auto)
+  @Volatile private var ctrlAntibanding = 3 // anti-banding (0 off, 1 50Hz, 2 60Hz, 3 auto)
 
   // V4L2 control ids (real V4L2 CIDs so generic control UIs recognise them).
   private const val CID_BRIGHTNESS = 0x00980900   // -> AE exposure compensation
   private const val CID_FOCUS_AUTO = 0x009A0901   // -> continuous AF on/off
   private const val CID_ZOOM_ABS   = 0x009A090D   // -> zoom ratio (API 30+)
+  private const val CID_WHITE_BALANCE = 0x0098091C // V4L2_CID_AUTO_N_PRESET_WHITE_BALANCE (menu)
+  private const val CID_POWER_LINE = 0x00980918    // V4L2_CID_POWER_LINE_FREQUENCY (menu, anti-banding)
 
   fun start(context: Context) {
     if (running) return
@@ -168,6 +174,7 @@ object CameraBridge {
 
   private fun handleClient(socket: Socket) {
     val first = clientCount.incrementAndGet() == 1
+    httpClients.incrementAndGet()
     if (first) openCamera()
     try {
       runCatching { socket.tcpNoDelay = true } // push frames out immediately (low latency)
@@ -209,6 +216,7 @@ object CameraBridge {
     } catch (e: Exception) {
       // Client went away — normal.
     } finally {
+      httpClients.decrementAndGet()
       if (clientCount.decrementAndGet() == 0) closeCamera()
     }
   }
@@ -240,11 +248,7 @@ object CameraBridge {
         reader.setOnImageAvailableListener({ r ->
           val img = try { r.acquireLatestImage() } catch (e: Exception) { null } ?: return@setOnImageAvailableListener
           try {
-            val jpeg = yuvToJpeg(img)
-            if (jpeg != null) {
-              latestJpeg = jpeg
-              synchronized(frameLock) { frameSeq++; frameLock.notifyAll() }
-            }
+            processImage(img)
           } catch (e: Exception) {
             // Skip a bad frame.
           } finally {
@@ -366,26 +370,32 @@ object CameraBridge {
     }
   }
 
-  private fun yuvToJpeg(image: Image): ByteArray? {
+  /** Per-frame processing. Only does the work a current consumer needs: the raw
+   *  (landscape) NV21 is always kept (cheap), but the full-frame rotation and the
+   *  JPEG encode are skipped unless an HTTP client or an upright/MJPG V4L2 client
+   *  is actually consuming them — so a YUYV-landscape grab (the low-latency path)
+   *  pays neither. */
+  private fun processImage(image: Image) {
     val raw = yuv420ToNv21(image)
-    // Stash the RAW (landscape) frame for the default V4L2 path.
-    rawNv21 = raw; rawW = image.width; rawH = image.height
-    var nv21 = raw
-    var w = image.width
-    var h = image.height
-    // Rotate to upright using the sensor mounting orientation (back cameras are usually 90°),
-    // otherwise the stream comes out sideways.
-    val rot = ((sensorOrientation % 360) + 360) % 360
-    if (rot != 0) {
-      nv21 = rotateNv21(nv21, w, h, rot)
-      if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
+    val rw = image.width; val rh = image.height
+    val landscape = NeoPreference.isCameraV4l2Landscape()
+    val http = httpClients.get() > 0
+    val wantRot = http || (v4lStreaming && !landscape)
+    val wantJpg = http || (v4lStreaming && v4lFourcc == "MJPG" && !landscape)
+    var rot: ByteArray? = null; var rwd = rw; var rhd = rh
+    if (wantRot) {
+      val r = ((sensorOrientation % 360) + 360) % 360
+      if (r != 0) { rot = rotateNv21(raw, rw, rh, r); if (r == 90 || r == 270) { rwd = rh; rhd = rw } }
+      else rot = raw
     }
-    // Stash the upright NV21 + dims for the V4L2 YUYV path (raw-capture apps).
-    latestNv21 = nv21; nv21W = w; nv21H = h
-    val yuv = YuvImage(nv21, ImageFormat.NV21, w, h, null)
-    val out = ByteArrayOutputStream()
-    return if (yuv.compressToJpeg(Rect(0, 0, w, h), JPEG_QUALITY, out))
-      out.toByteArray() else null
+    val jpg = if (wantJpg && rot != null) nv21ToJpeg(rot, rwd, rhd) else null
+    synchronized(frameLock) {
+      rawNv21 = raw; rawW = rw; rawH = rh
+      if (rot != null) { latestNv21 = rot; nv21W = rwd; nv21H = rhd }
+      if (jpg != null) latestJpeg = jpg
+      frameSeq++
+      frameLock.notifyAll()
+    }
   }
 
   /** Rotate an NV21 buffer by 90/180/270° clockwise. Returns a new buffer; for 90/270 the
@@ -536,18 +546,20 @@ object CameraBridge {
             val ok = if (p.size >= 4) {
               v4lFourcc = p[1]
               if (!started) { started = true; clientCount.incrementAndGet() }
+              v4lStreaming = true
               ensureCaptureFor(p[2].toIntOrNull() ?: 640, p[3].toIntOrNull() ?: 480)
               true
             } else false
             out.write((if (ok) "OK\n" else "ERR\n").toByteArray())
           }
           "STOP" -> {
+            v4lStreaming = false
             if (started) { started = false; if (clientCount.decrementAndGet() == 0) closeCamera() }
             out.write("OK\n".toByteArray())
           }
           "FRAME" -> writeFrame(out, p.getOrNull(1)?.toIntOrNull() ?: 1000)
           "CTRL_LIST" -> out.write(ctrlListReply().toByteArray())
-          "CTRL_MENU" -> out.write("OK 0\n".toByteArray())   // no menu controls exposed
+          "CTRL_MENU" -> out.write(ctrlMenuReply(p.getOrNull(1)?.toLongOrNull()?.toInt() ?: -1).toByteArray())
           "CTRL_GET" -> {
             val v = ctrlGet(p.getOrNull(1)?.toLongOrNull()?.toInt() ?: -1)
             out.write((if (v != null) "OK $v\n" else "ERR\n").toByteArray())
@@ -563,6 +575,7 @@ object CameraBridge {
     } catch (e: Exception) {
       // client gone — normal
     } finally {
+      v4lStreaming = false
       if (started && clientCount.decrementAndGet() == 0) closeCamera()
       runCatching { socket.close() }
     }
@@ -699,17 +712,41 @@ object CameraBridge {
     }
   }
 
+  // White-balance menu: index == Camera2 AWB mode value, filtered to supported.
+  private val wbModes = linkedMapOf(
+    1 to "Auto", 2 to "Incandescent", 3 to "Fluorescent",
+    5 to "Daylight", 6 to "Cloudy", 8 to "Shade")
+  private fun wbAvailable(): Map<Int, String> {
+    val avail = chars()?.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toSet() ?: return wbModes
+    return wbModes.filterKeys { avail.contains(it) }.ifEmpty { wbModes }
+  }
+  private val antibandModes = linkedMapOf(0 to "Disabled", 1 to "50 Hz", 2 to "60 Hz", 3 to "Auto")
+
   private fun ctrlListReply(): String {
     val ev = evRange()
     val maxZoom = maxZoomPercent()
-    val sb = StringBuilder()
     val lines = ArrayList<String>()
-    // id type min max step def flags name      (type: 1=int 2=bool)
+    // id type min max step def flags name      (type: 1=int 2=bool 3=menu)
     lines.add("$CID_BRIGHTNESS 1 ${ev.lower} ${ev.upper} 1 0 0 Brightness")
     lines.add("$CID_FOCUS_AUTO 2 0 1 1 1 0 Focus, Automatic Continuous")
     if (maxZoom > 100) lines.add("$CID_ZOOM_ABS 1 100 $maxZoom 1 100 0 Zoom, Absolute")
-    sb.append("OK ${lines.size}\n")
+    val wb = wbAvailable().keys.toList()
+    if (wb.isNotEmpty()) lines.add("$CID_WHITE_BALANCE 3 ${wb.min()} ${wb.max()} 1 1 0 White Balance, Preset")
+    lines.add("$CID_POWER_LINE 3 0 3 1 3 0 Power Line Frequency")
+    val sb = StringBuilder("OK ${lines.size}\n")
     for (l in lines) sb.append(l).append("\n")
+    return sb.toString()
+  }
+
+  /** Menu items "OK <n>" + "<index> <name>" for a menu control (else "OK 0"). */
+  private fun ctrlMenuReply(id: Int): String {
+    val items = when (id) {
+      CID_WHITE_BALANCE -> wbAvailable()
+      CID_POWER_LINE -> antibandModes
+      else -> emptyMap()
+    }
+    val sb = StringBuilder("OK ${items.size}\n")
+    for ((idx, name) in items) sb.append("$idx $name\n")
     return sb.toString()
   }
 
@@ -717,6 +754,8 @@ object CameraBridge {
     CID_BRIGHTNESS -> ctrlEv
     CID_FOCUS_AUTO -> ctrlAf
     CID_ZOOM_ABS -> ctrlZoom
+    CID_WHITE_BALANCE -> ctrlWb
+    CID_POWER_LINE -> ctrlAntibanding
     else -> null
   }
 
@@ -725,6 +764,8 @@ object CameraBridge {
       CID_BRIGHTNESS -> { val r = evRange(); ctrlEv = value.coerceIn(r.lower, r.upper) }
       CID_FOCUS_AUTO -> ctrlAf = if (value != 0) 1 else 0
       CID_ZOOM_ABS -> ctrlZoom = value.coerceIn(100, maxZoomPercent())
+      CID_WHITE_BALANCE -> ctrlWb = if (wbAvailable().containsKey(value)) value else ctrlWb
+      CID_POWER_LINE -> ctrlAntibanding = value.coerceIn(0, 3)
       else -> return false
     }
     reapplyControls()
@@ -738,6 +779,27 @@ object CameraBridge {
       req.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, ctrlEv)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && ctrlZoom > 100)
       req.set(CaptureRequest.CONTROL_ZOOM_RATIO, ctrlZoom / 100f)
+    req.set(CaptureRequest.CONTROL_AWB_MODE, ctrlWb)
+    req.set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, ctrlAntibanding)
+    // ── low-latency / smoothness tuning ──
+    // Lock the frame-rate floor so auto-exposure can't drop to 15/7 fps in low
+    // light (the usual cause of a laggy, stuttery preview).
+    bestFpsRange()?.let { req.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+    // No video stabilisation / minimal post-processing → fewer pipeline stages.
+    runCatching { req.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF) }
+    runCatching { req.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST) }
+    runCatching { req.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_FAST) }
+  }
+
+  /** Pick a fixed-30 (or highest constant) target FPS range to keep the preview
+   *  from dropping its frame rate in low light. */
+  private fun bestFpsRange(): Range<Int>? {
+    val ranges = chars()?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
+    // Prefer a constant 30 fps; else the constant range with the highest fps;
+    // else the range with the highest lower bound (least likely to stutter).
+    return ranges.firstOrNull { it.lower == 30 && it.upper == 30 }
+      ?: ranges.filter { it.lower == it.upper }.maxByOrNull { it.upper }
+      ?: ranges.maxByOrNull { it.lower }
   }
 
   /** Rebuild + re-submit the repeating request after a control change. */

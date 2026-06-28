@@ -124,9 +124,16 @@ natively — `cv2.VideoCapture(0)`, `ffmpeg -f v4l2 -i /dev/video0`, GStreamer
   camera's real resolutions (enumerated via `VIDIOC_ENUM_FRAMESIZES`).
 - **I/O methods:** `MMAP` (the guest mmaps the marker file; frames are `pwrite()`n
   into it at the buffer offset — no mmap interception), `USERPTR`, and `read()`.
-- **Controls** are proxied to Camera2 and show up under `v4l2-ctl --list-ctrls`:
-  brightness (→ AE exposure compensation), continuous autofocus, and zoom
-  (`CONTROL_ZOOM_RATIO`, Android 11+).
+- **Controls** are proxied to Camera2 and show up under `v4l2-ctl --list-ctrls-menus`:
+  brightness (→ AE exposure compensation), continuous autofocus, zoom
+  (`CONTROL_ZOOM_RATIO`, Android 11+), white-balance presets, and power-line
+  frequency / anti-banding.
+- **Low latency:** the capture locks a constant frame-rate floor (so auto-exposure
+  can't drop to 15/7 fps in low light), disables video stabilisation and uses
+  fast noise-reduction/edge processing. Per-frame work is also skipped when no
+  consumer needs it — a YUYV-landscape grab pays neither the rotate nor the JPEG
+  encode. For the lowest latency prefer **MJPG** (≈25× less data than YUYV); e.g.
+  `ffmpeg -input_format mjpeg …` or mpv's `--demuxer-lavf-o=input_format=mjpeg`.
 - A fake `/sys/dev/char/81:0/uevent` (`DEVNAME=video0`) lets `v4l2-ctl`/`libv4l`
   classify the node; `NEOTERM_CAMERA_V4L2=/dev/video0` is exported as a hint.
 - **Orientation:** delivered in native **landscape** by default (like a USB webcam);
