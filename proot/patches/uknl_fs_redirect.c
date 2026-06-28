@@ -26,6 +26,8 @@ static int uk_fs_on(void)
 /* TEMP debug: append a line to the app kmsg buffer (defined later, near uk_dbg). */
 static void uk_dbg_line(const char *line);
 static void uk_dbg(Tracee *tracee, const char *line);   /* fwd (defined below) */
+static void uk_dbgv_line(const char *line);             /* verbose: only if UK_FS_DEBUG */
+static void uk_dbgv(Tracee *tracee, const char *line);  /* verbose: only if UK_FS_DEBUG */
 static int  ukfs_tgid(int tid);                          /* fwd (defined below) */
 static void ukfs_canon(const char *in, char *out, size_t osz);  /* fwd (defined below) */
 static void ukfs_unmount_slot(int i);                           /* fwd (defined below) */
@@ -245,7 +247,7 @@ void uknl_fuse_note_exec(int pid)
 		if (g_fch[i].used && g_fch[i].app_pid == 0 &&
 		    (g_fch[i].owner == pid || g_fch[i].owner2 == pid)) {
 			g_fch[i].app_pid = pid;
-			char l[80]; snprintf(l, sizeof l, "uk_fs: fuse app=%d chan=%d\n", pid, i); uk_dbg_line(l);
+			char l[80]; snprintf(l, sizeof l, "uk_fs: fuse app=%d chan=%d\n", pid, i); uk_dbgv_line(l);
 		}
 }
 
@@ -260,7 +262,7 @@ void uknl_fuse_owner_gone(int pid)
 {
 	for (int i = 0; i < UK_NFCH; i++) {
 		if (!g_fch[i].used || g_fch[i].app_pid != pid) continue;
-		{ char l[80]; snprintf(l, sizeof l, "uk_fs: fuse owner gone pid=%d chan=%d -> teardown\n", pid, i); uk_dbg_line(l); }
+		{ char l[80]; snprintf(l, sizeof l, "uk_fs: fuse owner gone pid=%d chan=%d -> teardown\n", pid, i); uk_dbgv_line(l); }
 		int found = 0;
 		for (int s = 0; s < UK_MAXM; s++)
 			if (g_m[s].used && g_m[s].fuse && g_m[s].fuse_chan == i) { ukfs_unmount_slot(s); found = 1; break; }
@@ -421,7 +423,7 @@ static struct ukfch *fch_resolve(Tracee *tracee, int fd)
 		if (g_fch_fork[i].used && (g_fch_fork[i].pid == tg || g_fch_fork[i].pid == tracee->pid)) {
 			int c = g_fch_fork[i].chan;
 			if (c >= 0 && g_fch[c].used && g_fch[c].eng && g_fch[c].fd == fd) {
-				char l[80]; snprintf(l, sizeof l, "uk_fs: fuse adopt fd=%d pid=%d (fork hint)\n", fd, tg); uk_dbg_line(l);
+				char l[80]; snprintf(l, sizeof l, "uk_fs: fuse adopt fd=%d pid=%d (fork hint)\n", fd, tg); uk_dbgv_line(l);
 				g_fch[c].pid = tg; return &g_fch[c];
 			}
 		}
@@ -502,7 +504,7 @@ static void uknl_fuse_open_exit(Tracee *tracee)
 	 * works whether the runtime mounts directly or via a forked helper. */
 	ch->owner = pid; ch->owner2 = fch_ppid(tracee->pid); ch->app_pid = 0;
 	fch_fdpath(tracee->pid, (int) fd, ch->marker, sizeof ch->marker);   /* for fork adoption */
-	{ char l[96]; snprintf(l, sizeof l, "uk_fs: /dev/fuse open fd=%ld pid=%d ppid=%d\n", fd, pid, ch->owner2); uk_dbg(tracee, l); }
+	{ char l[96]; snprintf(l, sizeof l, "uk_fs: /dev/fuse open fd=%ld pid=%d ppid=%d\n", fd, pid, ch->owner2); uk_dbgv(tracee, l); }
 }
 
 /* The daemon's read()/write() on a /dev/fuse channel fd (intercepted like the
@@ -615,7 +617,7 @@ static bool uknl_fuse_mount(Tracee *tracee)
 	struct ukfch *ch = fch_resolve(tracee, fdN);
 	if (!ch || !ch->eng) { char l[160]; snprintf(l, sizeof l, "uk_fs: fuse mount fd=%d '%s' no channel\n", fdN, tgt); uk_dbg(tracee, l); return false; }
 	if (ukm_register_fuse(tgt, ch->eng, (int)(ch - g_fch)) < 0) return false;
-	{ char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: FUSE mount '%s' fd=%d\n", tgt, fdN); uk_dbg(tracee, l); }
+	{ char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: FUSE mount '%s' fd=%d\n", tgt, fdN); uk_dbgv(tracee, l); }
 	return true;
 }
 
@@ -717,7 +719,7 @@ static int ukfs_do_mount(void)
 	}
 	char line[64];
 	if (uksd_rl(m->sock, line, sizeof line) < 0) { uk_dbg_line("uk_fs: MOUNT no reply\n"); return -1; }
-	if (line[0] == 'O' && line[1] == 'K') { char l[80]; snprintf(l, sizeof l, "uk_fs: MOUNT %s OK\n", m->token); uk_dbg_line(l); return 0; }
+	if (line[0] == 'O' && line[1] == 'K') { char l[80]; snprintf(l, sizeof l, "uk_fs: MOUNT %s OK\n", m->token); uk_dbgv_line(l); return 0; }
 	{ char l[128]; snprintf(l, sizeof l, "uk_fs: MOUNT %s rejected: '%s'\n", m->token, line); uk_dbg_line(l); }
 	return -1;
 }
@@ -750,7 +752,7 @@ static int ukfs_conn(void)
 			uk_dbg_line(l); close(s); return -1;
 		}
 		m->sock = s;
-		{ char l[80]; snprintf(l, sizeof l, "uk_fs: connected %s fd=%d (%s)\n", m->fsname, s, m->token); uk_dbg_line(l); }
+		{ char l[80]; snprintf(l, sizeof l, "uk_fs: connected %s fd=%d (%s)\n", m->fsname, s, m->token); uk_dbgv_line(l); }
 	}
 	if (!m->ready) {
 		if (ukfs_do_mount() != 0) { ukfs_sdrop(); return -1; }
@@ -991,7 +993,7 @@ static bool ukfs_loop_ioctl(Tracee *tracee)
 		if (!ukfs_fd_hostpath(tracee, (int) arg, ip, sizeof ip)) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EBADF); set_sysnum(tracee, PR_void); return true; }
 		L->used = 1; L->off = 0; L->sizelimit = 0; L->partscan = 0;
 		snprintf(L->img, sizeof L->img, "%s", ip); g_lo_any = 1;
-		{ char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: LOOP_SET_FD loop%d <- %s\n", n, ip); uk_dbg_line(l); }
+		{ char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: LOOP_SET_FD loop%d <- %s\n", n, ip); uk_dbgv_line(l); }
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
 	case UK_LOOP_CONFIGURE: {
@@ -1004,7 +1006,7 @@ static bool ukfs_loop_ioctl(Tracee *tracee)
 		if (!ukfs_fd_hostpath(tracee, (int) imgfd, ip, sizeof ip)) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EBADF); set_sysnum(tracee, PR_void); return true; }
 		L->used = 1; g_lo_any = 1; snprintf(L->img, sizeof L->img, "%s", ip);
 		L->off = (long long) off; L->sizelimit = (long long) szl; L->partscan = (flags & UK_LO_FLAGS_PARTSCAN) ? 1 : 0;
-		{ char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: LOOP_CONFIGURE loop%d <- %s off=%llu szl=%llu ps=%d\n", n, ip, off, szl, L->partscan); uk_dbg_line(l); }
+		{ char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: LOOP_CONFIGURE loop%d <- %s off=%llu szl=%llu ps=%d\n", n, ip, off, szl, L->partscan); uk_dbgv_line(l); }
 		poke_reg(tracee, SYSARG_RESULT, 0); set_sysnum(tracee, PR_void); return true;
 	}
 	case UK_LOOP_SET_STATUS:
@@ -1046,7 +1048,7 @@ static int ukfs_register_any(const char *src, const char *tgt)
 	char img[600]; long long base = 0, size = 0;
 	if (ukfs_loop_resolve(src, img, sizeof img, &base, &size)) {
 		int r = ukm_register(tgt, img, base, size, 1);
-		if (r >= 0) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: loop mount %s -> %s base=%lld size=%lld\n", src, img, base, size); uk_dbg_line(l); }
+		if (r >= 0) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: loop mount %s -> %s base=%lld size=%lld\n", src, img, base, size); uk_dbgv_line(l); }
 		return r;
 	}
 	return -1;
@@ -1791,6 +1793,16 @@ static void uk_dbg(Tracee *tracee, const char *line)
 	}
 	uk_dbg_line(line);
 }
+/* Verbose/info tracing — emitted only when UK_FS_DEBUG is set, so the default
+ * dmesg stays clean. Error/failure paths keep using uk_dbg_line/uk_dbg directly. */
+static int uk_verbose(void)
+{
+	static int v = -1;
+	if (v < 0) { const char *e = getenv("UK_FS_DEBUG"); v = (e && *e && *e != '0') ? 1 : 0; }
+	return v;
+}
+static void uk_dbgv_line(const char *line) { if (uk_verbose()) uk_dbg_line(line); }
+static void uk_dbgv(Tracee *tracee, const char *line) { if (uk_verbose()) uk_dbg(tracee, line); }
 
 /* Mount hook, called from apply_emulated_mount() — the common point for BOTH
  * the normal mount(2) trap AND the SIGSYS path Android uses to block mount(2)
@@ -1815,7 +1827,7 @@ static bool uknl_fs_mount_hook(Tracee *tracee)
 	if (ukfs_register_any(src, tgt) < 0) return false;
 	char l[PATH_MAX + 96];
 	snprintf(l, sizeof l, "uk_fs: MOUNT hook src='%s' tgt='%s' (deferred)\n", src, tgt);
-	uk_dbg(tracee, l);
+	uk_dbgv(tracee, l);
 	return true;
 }
 
@@ -1829,7 +1841,7 @@ static bool uknl_fs_umount_hook(Tracee *tracee)
 	if (get_sysarg_path(tracee, tgt, SYSARG_1) < 0) return false;
 	char l[PATH_MAX + 64];
 	snprintf(l, sizeof l, "uk_fs: UMOUNT hook tgt='%s'\n", tgt);
-	uk_dbg(tracee, l);
+	uk_dbgv(tracee, l);
 	return ukfs_umount_target(tracee, tgt) ? true : false;   /* not our mount point -> let proot handle */
 }
 
@@ -2023,7 +2035,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		snprintf(l, sizeof l, "uk_fs: INIT v50-loop UK_FS='%s' UK_BLOCK='%s'\n",
 		         getenv("UK_FS") ? getenv("UK_FS") : "(null)",
 		         getenv("UK_BLOCK") ? getenv("UK_BLOCK") : "(null)");
-		uk_dbg(tracee, l);
+		uk_dbgv(tracee, l);
 	}
 	if (nr == PR_mount) {
 		word_t dsa = peek_reg(tracee, CURRENT, SYSARG_1);
@@ -2033,7 +2045,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		snprintf(line, sizeof line,
 		         "uk_fs: PR_mount src='%s' on=%d is_dev=%d\n",
 		         dbg, uk_fs_on(), ukfs_src_is_dev(dbg));
-		uk_dbg(tracee, line);
+		uk_dbgv(tracee, line);
 	}
 
 	if (!uk_fs_on()) return false;
@@ -2197,7 +2209,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 						write_data(tracee, s_v, arr, (word_t) ai * sizeof(word_t));
 						set_sysarg_path(tracee, interp, patharg);     /* exec the interpreter */
 						poke_reg(tracee, argvarg, s_v);
-						char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: exec script %s via %s ($0 preserved)\n", gp, interp); uk_dbg(tracee, l);
+						char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: exec script %s via %s ($0 preserved)\n", gp, interp); uk_dbgv(tracee, l);
 						return false;
 					}
 				}
@@ -2394,7 +2406,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 		}
 		long n = ukfs_write_at(v->path, pos, tmp, len);
 		free(tmp);
-		if (strstr(v->path, "config")) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: WRITE poke=%ld off=%lld len=%zu p='%s'\n", n, pos, len, v->path); uk_dbg_line(l); }
+		if (strstr(v->path, "config")) { char l[PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: WRITE poke=%ld off=%lld len=%zu p='%s'\n", n, pos, len, v->path); uk_dbgv_line(l); }
 		if (n < 0) { poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EIO); set_sysnum(tracee, PR_void); return true; }
 		/* advance the cursor: for O_APPEND to the post-write EOF (pos was the live size),
 		 * otherwise from the previous cursor. pwrite64 never moves the cursor. */
@@ -2474,7 +2486,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 			 * is O(n^2) (each sync rewrites the whole dirty-buffer list). */
 			if (v->wrote) {
 				long sr = ukfs_simple("SYNC ", v->path);
-				if (strstr(v->path, "config")) { char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: CLOSE sync=%ld p='%s'\n", sr, v->path); uk_dbg_line(l); }
+				if (strstr(v->path, "config")) { char l[PATH_MAX + 64]; snprintf(l, sizeof l, "uk_fs: CLOSE sync=%ld p='%s'\n", sr, v->path); uk_dbgv_line(l); }
 			}
 			vfd_free(v);
 		}
@@ -2769,7 +2781,7 @@ static bool uknl_fs_dispatch(Tracee *tracee, word_t nr)
 			poke_reg(tracee, SYSARG_RESULT, (word_t)(long) - EXDEV); set_sysnum(tracee, PR_void); return true;
 		}
 		long rr = ukfs_two_path("RENAME", orel, nrel);
-		{ char l[2 * PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: RENAME poke=%ld o='%s' n='%s'\n", rr, orel, nrel); uk_dbg_line(l); }
+		{ char l[2 * PATH_MAX + 96]; snprintf(l, sizeof l, "uk_fs: RENAME poke=%ld o='%s' n='%s'\n", rr, orel, nrel); uk_dbgv_line(l); }
 		pend_res_set(tracee->pid, nr, rr);
 		poke_reg(tracee, SYSARG_RESULT, (word_t)(long) rr); set_sysnum(tracee, PR_void); return true;
 	}
