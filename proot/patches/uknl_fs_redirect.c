@@ -1549,6 +1549,22 @@ static struct ukfs_vfd *vfd_alloc(void)
 }
 static void vfd_free(struct ukfs_vfd *v) { if (v) { free(v->dents); memset(v, 0, sizeof *v); } }
 
+/* A traced process exited. Reap its vfds and loop fds: a short-lived process
+ * (e.g. rpi-imager spawning lsblk over and over for drive polling) just exits
+ * without close()ing its open library fds — the kernel closes them, so the
+ * redirect never sees the close and the vfd slot leaks. Enough rapid forks then
+ * exhaust the 128-slot table; further opens get no vfd and their reads fall
+ * through to the empty placeholder, so the dynamic loader reports "file too
+ * short". Freeing on exit keeps the table from filling. Called per tracee exit. */
+void uknl_fs_pid_gone(int pid);
+void uknl_fs_pid_gone(int pid)
+{
+	for (int i = 0; i < 128; i++)
+		if (g_vfd[i].used && g_vfd[i].pid == pid) vfd_free(&g_vfd[i]);
+	for (int i = 0; i < 64; i++)
+		if (g_lofd[i].used && g_lofd[i].pid == pid) { close(g_lofd[i].hostfd); memset(&g_lofd[i], 0, sizeof g_lofd[i]); }
+}
+
 /* Lazy fd-inheritance: a forked child inherits a COPY of the parent's fd table, but
  * our vfds are keyed by tgid, so the child's tgid starts empty. proot tracks
  * fork/clone via ptrace EVENTS (not translate_syscall_exit), so we can't copy at
