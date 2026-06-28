@@ -351,6 +351,18 @@ object BlockBridge {
       synchronized(this) {
         when (p[0]) {
           "OPEN", "SIZE" -> reply(out, if (deviceName != null) "OK $totalBytes $sectorSize\n" else "ERR\n")
+          "PARTS" -> {
+            // Enumerate the live partition table so the proxy can expose
+            // /dev/uksd0pN nodes at the right offsets. "OK <n>\n" then n lines
+            // "<idx> <startBytes> <sizeBytes>\n".
+            if (deviceName == null) reply(out, "ERR\n")
+            else {
+              val parts = runCatching { BlockSysfsBridge.partitions { o, l -> readCoherent(o, l) } }.getOrDefault(emptyList())
+              val sb = StringBuilder("OK ${parts.size}\n")
+              for (p in parts) sb.append("${p.idx} ${p.startBytes} ${p.sizeBytes}\n")
+              reply(out, sb.toString())
+            }
+          }
           "READ" -> {
             val off = p.getOrNull(1)?.toLongOrNull(); val len = p.getOrNull(2)?.toIntOrNull()
             val data = if (off != null && len != null) readCoherent(off, len) else null

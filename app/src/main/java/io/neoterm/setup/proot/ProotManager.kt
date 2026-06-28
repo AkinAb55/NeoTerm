@@ -229,7 +229,7 @@ object ProotManager {
       // a mount of /dev/uksd0pN to ukfsd on io.neoterm.fs.pN (one daemon each, see
       // FsBridge). Bind empty markers so the guest `mount /dev/uksd0pN` resolves;
       // probing a non-existent partition simply yields a failed mount.
-      for (n in 1..4) {
+      for (n in 1..8) {
         val part = File(sysdata, "uksd0p$n")
         if (!part.exists()) runCatching { part.writeText("") }
         bind(args, part.absolutePath, "/dev/uksd0p$n")

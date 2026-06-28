@@ -28,6 +28,16 @@ object BlockSysfsBridge {
 
   private data class Part(val idx: Int, val startBytes: Long, val sizeBytes: Long)
 
+  /** Public partition descriptor (idx, byte offset, byte size). */
+  data class PartInfo(val idx: Int, val startBytes: Long, val sizeBytes: Long)
+
+  /** Parse the device's partition table (MBR primary + GPT) via [read]. Shared with
+   *  [BlockBridge] so the block proxy can expose /dev/uksd0pN nodes at the right
+   *  offsets. Empty list = no/invalid table (whole-device "superfloppy"). */
+  fun partitions(read: (Long, Int) -> ByteArray?): List<PartInfo> =
+    runCatching { parsePartitions(read).map { PartInfo(it.idx, it.startBytes, it.sizeBytes) } }
+      .getOrDefault(emptyList())
+
   /** Host dir → guest path binds (empty list when USB storage is off). */
   fun sysfsBinds(): List<Pair<String, String>> {
     if (!NeoPreference.isUsbStorageEnabled()) return emptyList()
