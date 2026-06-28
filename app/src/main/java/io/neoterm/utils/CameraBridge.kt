@@ -73,15 +73,15 @@ object CameraBridge {
   private val clientCount = AtomicInteger(0)
   private val frameLock = Object()
   @Volatile private var latestJpeg: ByteArray? = null
-  /** Latest frame as an upright NV21 buffer (+ dims) for the V4L2 YUYV path. */
-  @Volatile private var latestNv21: ByteArray? = null
-  @Volatile private var nv21W = 0
-  @Volatile private var nv21H = 0
-  /** Latest frame as a RAW (pre-rotation, landscape) NV21 buffer — the default
-   *  V4L2 path delivers this so /dev/video0 behaves like a landscape USB webcam. */
+  /** Latest frame as a RAW (pre-rotation, landscape) NV21 buffer — the single
+   *  source for the V4L2 path; [writeFrame] rotates/scales it to the exact size. */
   @Volatile private var rawNv21: ByteArray? = null
   @Volatile private var rawW = 0
   @Volatile private var rawH = 0
+  /** The size the V4L2 client negotiated (from START) — every delivered frame is
+   *  produced at exactly this size, so the stream can never shear. */
+  @Volatile private var reqOutW = 0
+  @Volatile private var reqOutH = 0
   @Volatile private var frameSeq = 0
   /** Camera sensor mounting orientation in degrees; frames are rotated by this to be upright. */
   @Volatile private var sensorOrientation = 0
@@ -418,28 +418,21 @@ object CameraBridge {
     }
   }
 
-  /** Per-frame processing. Only does the work a current consumer needs: the raw
-   *  (landscape) NV21 is always kept (cheap), but the full-frame rotation and the
-   *  JPEG encode are skipped unless an HTTP client or an upright/MJPG V4L2 client
-   *  is actually consuming them — so a YUYV-landscape grab (the low-latency path)
-   *  pays neither. */
+  /** Per-frame processing. Always keep the raw (landscape) NV21 — cheap, and the
+   *  single source for the V4L2 path. The upright JPEG (latestJpeg) is encoded only
+   *  while an HTTP client is connected; the V4L2 path builds its frames on demand in
+   *  [writeFrame], exactly at the negotiated size (so the stream can never shear). */
   private fun processImage(image: Image) {
     val raw = yuv420ToNv21(image)
     val rw = image.width; val rh = image.height
-    val landscape = NeoPreference.isCameraV4l2Landscape()
-    val http = httpClients.get() > 0
-    val wantRot = http || (v4lStreaming && !landscape)
-    val wantJpg = http || (v4lStreaming && v4lFourcc == "MJPG" && !landscape)
-    var rot: ByteArray? = null; var rwd = rw; var rhd = rh
-    if (wantRot) {
+    val jpg = if (httpClients.get() > 0) {
       val r = ((sensorOrientation % 360) + 360) % 360
-      if (r != 0) { rot = rotateNv21(raw, rw, rh, r); if (r == 90 || r == 270) { rwd = rh; rhd = rw } }
-      else rot = raw
-    }
-    val jpg = if (wantJpg && rot != null) nv21ToJpeg(rot, rwd, rhd) else null
+      if (r != 0) { val rt = rotateNv21(raw, rw, rh, r)
+        if (r == 90 || r == 270) nv21ToJpeg(rt, rh, rw) else nv21ToJpeg(rt, rw, rh)
+      } else nv21ToJpeg(raw, rw, rh)
+    } else null
     synchronized(frameLock) {
       rawNv21 = raw; rawW = rw; rawH = rh
-      if (rot != null) { latestNv21 = rot; nv21W = rwd; nv21H = rhd }
       if (jpg != null) latestJpeg = jpg
       frameSeq++
       frameLock.notifyAll()
@@ -593,9 +586,11 @@ object CameraBridge {
           "START" -> {
             val ok = if (p.size >= 4) {
               v4lFourcc = p[1]
+              reqOutW = p[2].toIntOrNull() ?: 640
+              reqOutH = p[3].toIntOrNull() ?: 480
               if (!started) { started = true; clientCount.incrementAndGet() }
               v4lStreaming = true
-              ensureCaptureFor(p[2].toIntOrNull() ?: 640, p[3].toIntOrNull() ?: 480)
+              ensureCaptureFor(reqOutW, reqOutH)
               true
             } else false
             out.write((if (ok) "OK\n" else "ERR\n").toByteArray())
@@ -700,20 +695,49 @@ object CameraBridge {
         runCatching { frameLock.wait(rem) }
       }
     }
-    val landscape = NeoPreference.isCameraV4l2Landscape()
-    // Landscape (default): deliver the raw sensor frame. Upright: the rotated one.
-    val src = if (landscape) rawNv21 else latestNv21
-    val sw = if (landscape) rawW else nv21W
-    val sh = if (landscape) rawH else nv21H
-    val data: ByteArray? = when {
-      src == null -> null
-      v4lFourcc == "YUYV" -> nv21ToYuyv(src, sw, sh)
-      landscape -> nv21ToJpeg(src, sw, sh)     // MJPG, native orientation
-      else -> latestJpeg                        // MJPG, already-rotated (HTTP-shared)
+    // Build the frame at EXACTLY the negotiated size (reqOutW×reqOutH) from the raw
+    // landscape frame: rotate when the negotiated orientation differs from the
+    // sensor's, then scale to the exact size. Delivering anything other than the
+    // negotiated WxH is what makes a V4L2 stream shear, so this is size-exact.
+    val base = rawNv21
+    if (base == null || reqOutW < 2 || reqOutH < 2) { out.write("ERR\n".toByteArray()); return }
+    var buf = base; var bw = rawW; var bh = rawH
+    val needRotate = (reqOutW < reqOutH) != (bw < bh)
+    if (needRotate) {
+      val r = if (sensorOrientation == 90 || sensorOrientation == 270) sensorOrientation else 90
+      buf = rotateNv21(buf, bw, bh, r)
+      val t = bw; bw = bh; bh = t                 // 90/270 swap dims
     }
+    if (bw != reqOutW || bh != reqOutH) { buf = scaleNv21(buf, bw, bh, reqOutW, reqOutH); bw = reqOutW; bh = reqOutH }
+    val data: ByteArray? =
+      if (v4lFourcc == "YUYV") nv21ToYuyv(buf, bw, bh) else nv21ToJpeg(buf, bw, bh)
     if (data == null) { out.write("ERR\n".toByteArray()); return }
     out.write("OK ${data.size}\n".toByteArray())
     out.write(data)
+  }
+
+  /** Nearest-neighbour NV21 resize (dw/dh must be even). Only runs when the produced
+   *  size doesn't already match the negotiated size, so it's off the hot path. */
+  private fun scaleNv21(src: ByteArray, sw: Int, sh: Int, dw: Int, dh: Int): ByteArray {
+    if (sw == dw && sh == dh) return src
+    val out = ByteArray(dw * dh * 3 / 2)
+    for (y in 0 until dh) {
+      val sy = y * sh / dh
+      val sRow = sy * sw; val dRow = y * dw
+      for (x in 0 until dw) out[dRow + x] = src[sRow + (x * sw / dw)]
+    }
+    val sCW = sw / 2; val sCH = sh / 2; val dCW = dw / 2; val dCH = dh / 2
+    val sBase = sw * sh; val dBase = dw * dh
+    for (cy in 0 until dCH) {
+      val scy = cy * sCH / dCH
+      for (cx in 0 until dCW) {
+        val scx = cx * sCW / dCW
+        val s = sBase + (scy * sCW + scx) * 2
+        val d = dBase + (cy * dCW + cx) * 2
+        out[d] = src[s]; out[d + 1] = src[s + 1]
+      }
+    }
+    return out
   }
 
   /** Encode an NV21 buffer to JPEG (for the landscape MJPG path). */
