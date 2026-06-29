@@ -285,6 +285,14 @@ object ProotManager {
     // (Android SELinux blocks the real /sys/dev/block). Empty until a drive attaches.
     io.neoterm.setup.usbserial.BlockSysfsBridge.sysfsBinds().forEach { (host, guest) -> bind(args, host, guest) }
 
+    // USB host: a fake /sys/bus/usb (populated by UsbSysfsBridge from the Android
+    // UsbManager) so the distro's UNMODIFIED libusb/libudev enumerate USB devices
+    // (lsusb, pyusb, …) — no patched libusb, no preload. The real /sys/bus/usb is
+    // EACCES for the app uid anyway, so overlaying it is strictly better. Paired
+    // with SYSTEMD_DEVICE_VERIFY_SYSFS=0 + UK_USB (see getEnvp).
+    io.neoterm.utils.UsbSysfsBridge.sysfsBinds().forEach { (host, guest) -> bind(args, host, guest) }
+    runCatching { io.neoterm.utils.UsbBridge.refreshSysfs() }   // fill from current UsbManager state
+
     // Camera: expose a REAL /dev/video0 V4L2 node (proot cam shim, UK_CAM). An empty
     // marker becomes the device; the shim (uknl_cam_redirect.c) proxies its V4L2
     // ioctls/read/mmap to CameraBridge over io.neoterm.camera, so OpenCV/ffmpeg/

@@ -42,6 +42,13 @@ object UsbBridge {
   private var receiver: BroadcastReceiver? = null
   private var server: Thread? = null
   @Volatile private var serverSocket: LocalServerSocket? = null
+  @Volatile private var appCtx: Context? = null
+
+  /** Rebuild the fake /sys/bus/usb from the current UsbManager state (for the
+   *  distro's unmodified libusb/libudev). Safe to call repeatedly. */
+  fun refreshSysfs() {
+    appCtx?.let { runCatching { UsbSysfsBridge.refresh(it) } }
+  }
 
   // Open connections by device name (/dev/bus/usb/BBB/DDD), kept open so their
   // fd stays valid for serving to the distro.
@@ -50,6 +57,7 @@ object UsbBridge {
   fun register(context: Context) {
     if (receiver != null) return
     val app = context.applicationContext
+    appCtx = app
     val r = UsbReceiver()
     val filter = IntentFilter().apply {
       addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
@@ -61,6 +69,7 @@ object UsbBridge {
     receiver = r
     startServer(app)
     runCatching { requestForConnected(app) }
+    refreshSysfs()
   }
 
   fun unregister(context: Context) {
@@ -144,6 +153,13 @@ object UsbBridge {
       connections.remove(device.deviceName)?.let { runCatching { it.close() } }
     }
   }
+
+  /** Raw USB descriptors (device + config blob) for a device, if we hold an open
+   *  connection to it — used by UsbSysfsBridge to populate the fake /sys/bus/usb.
+   *  Null for devices owned by the serial/block bridges or not yet opened (the
+   *  caller then synthesises a descriptor from the UsbDevice metadata). */
+  fun rawDescriptors(deviceName: String): ByteArray? =
+    synchronized(connections) { connections[deviceName]?.rawDescriptors }
 
   // ---- fd server (abstract unix socket; nothing touches the distro fs) ----
 
@@ -253,6 +269,9 @@ class UsbReceiver : BroadcastReceiver() {
         UsbBridge.onDetached(device)
       }
     }
+    // Keep the fake /sys/bus/usb in sync with attach/detach/permission changes so
+    // the distro's unmodified libusb/libudev see the current device set.
+    UsbBridge.refreshSysfs()
   }
 }
 
