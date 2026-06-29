@@ -102,6 +102,46 @@ for real hardware, but the proxy marshalling logic is host-checkable.
 → Plan: enumeration first (host-validated via umockdev + device), then control
 transfers (umockdev ioctl replay + device), then bulk/URB (device).
 
+## BLOCKER found while building Phase 1 (enumeration)
+
+umockdev (complete in-process fake `/sys`) → stock libusb enumerates. But the shim
+delivers enumeration via a **proot bind** that fakes only `/sys/bus/usb` (+ a
+`/sys/devices/...` subtree), leaving the rest of `/sys` as the host's real tree.
+That partial bind does **NOT** enumerate — `libusb_get_device_list` returns 0 even
+though, inside proot, every file is correct and readable:
+`/sys/bus/usb/devices/1-1 -> ../../../devices/neoterm-usb/1-1`, `idVendor`=1234,
+`subsystem -> .../bus/usb`, `descriptors`=36 bytes. So `libudev` needs more global
+`/sys` consistency than a partial overlay provides, and the exact missing bit can't
+be found because **proot blocks nested `ptrace`** → no `strace` *inside* proot (on
+host or device), so this can't be debugged the usual way.
+
+Two candidate ways forward (both need real device iteration, which is expensive
+without in-proot strace):
+
+1. **Comprehensive fake `/sys`** — overlay enough of `/sys` (bus/usb, class/, maybe
+   devices/) consistently for libudev. Risk: broad `/sys` overlay may disturb other
+   guest tooling; exact requirement unknown without strace.
+2. **Force the usbfs path** (bypass libudev): make libusb detect sysfs as
+   unavailable so it scans `/dev/bus/usb` and reads descriptors from the nodes.
+   Needs: libusb's sysfs-detection nuance (couldn't confirm without source/strace),
+   `/dev/bus/usb` markers, char-189 stat, and descriptor bytes per node (marker file
+   content or proxied read). Then the USBDEVFS ioctl proxy on top.
+
+## Assessment
+
+The no-patch path is a real **research effort**, materially harder than the camera:
+- libusb enumeration (libudev) is environment-finicky; a partial proot `/sys` bind
+  doesn't satisfy it, and `strace` is unavailable inside proot to diagnose.
+- The `USBDEVFS` I/O proxy is a large surface and can only be fully validated on
+  real hardware.
+The existing in-distro **patched libusb (`build-neoterm-libusb.sh`) works today** and
+is contained. Recommendation: keep the patch as the supported path; pursue the
+no-patch shim only as an opt-in research track (device-side), starting from the
+usbfs-path route (option 2) which avoids the libudev wall entirely.
+
+Deconfliction with ttyUSB/uksd0 remains SAFE either way (separate sockets/paths;
+app already deconflicts ownership).
+
 ## Phased plan
 
 1. **Enumerate**: `/dev/bus/usb` markers + getdents inject + char-189 stat + read
