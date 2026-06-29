@@ -113,7 +113,8 @@ struct usb_urb {
 	word_t gurb;             /* guest address of the struct usbdevfs_urb */
 	word_t gbuf;             /* guest address of the data buffer */
 	int len;                 /* buffer_length */
-	int is_in;               /* endpoint & 0x80 */
+	int is_in;               /* transfer returns data to the guest */
+	int is_control;          /* control URB: data sits after the 8-byte setup */
 	struct usbdevfs_urb *lurb;   /* tracer-local urb (kernel holds this until reap) */
 	void *lbuf;              /* tracer-local data buffer */
 };
@@ -318,13 +319,20 @@ static long usb_do_ioctl(Tracee *tracee, int rfd, unsigned long cmd, word_t arg)
 		int slot = -1;
 		for (int i = 0; i < USB_MAXURB; i++) if (!g_usburb[i].used) { slot = i; break; }
 		if (slot < 0) return -ENOMEM;
-		int is_in = (u.endpoint & 0x80) != 0;
+		int is_control = (u.type == USBDEVFS_URB_TYPE_CONTROL);
 		int blen = u.buffer_length;
 		void *lbuf = NULL;
 		if (blen > 0) {
 			lbuf = malloc((size_t)blen); if (!lbuf) return -ENOMEM;
-			if (!is_in) read_data(tracee, lbuf, (word_t)(uintptr_t)u.buffer, (word_t)blen);
+			/* Always copy the guest buffer in: control URBs carry their 8-byte setup
+			 * here (and OUT data after it), bulk/interrupt OUT carry their payload.
+			 * For IN transfers the bytes are overwritten by the device — harmless. */
+			read_data(tracee, lbuf, (word_t)(uintptr_t)u.buffer, (word_t)blen);
 		}
+		/* Direction: for control it's the setup packet's bmRequestType bit 7 (the
+		 * endpoint field is 0); for bulk/interrupt it's the endpoint's bit 7. */
+		int is_in = is_control ? (blen > 0 && (((unsigned char *)lbuf)[0] & 0x80))
+		                       : ((u.endpoint & 0x80) != 0);
 		/* a private copy the kernel keeps referencing until we reap it */
 		struct usbdevfs_urb *lurb = malloc(sizeof *lurb);
 		if (!lurb) { free(lbuf); return -ENOMEM; }
@@ -332,7 +340,7 @@ static long usb_do_ioctl(Tracee *tracee, int rfd, unsigned long cmd, word_t arg)
 		if (ioctl(rfd, USBDEVFS_SUBMITURB, lurb) < 0) { int e = errno; free(lbuf); free(lurb); return -e; }
 		struct usb_urb *T = &g_usburb[slot];
 		T->used = 1; T->rfd = rfd; T->gurb = arg; T->gbuf = (word_t)(uintptr_t)u.buffer;
-		T->len = blen; T->is_in = is_in; T->lurb = lurb; T->lbuf = lbuf;
+		T->len = blen; T->is_in = is_in; T->is_control = is_control; T->lurb = lurb; T->lbuf = lbuf;
 		return 0;
 	}
 	case USBDEVFS_REAPURB:
@@ -351,8 +359,10 @@ static long usb_do_ioctl(Tracee *tracee, int rfd, unsigned long cmd, word_t arg)
 		gu.start_frame = T->lurb->start_frame;
 		write_data(tracee, T->gurb, &gu, sizeof gu);
 		if (T->is_in && T->lbuf && T->lurb->actual_length > 0) {
-			int al = T->lurb->actual_length; if (al > T->len) al = T->len;
-			write_data(tracee, T->gbuf, T->lbuf, (word_t)al);
+			/* control data lands after the 8-byte setup packet; bulk/intr at offset 0 */
+			int off = T->is_control ? 8 : 0;
+			int al = T->lurb->actual_length; if (al > T->len - off) al = T->len - off;
+			if (al > 0) write_data(tracee, T->gbuf + off, (char *)T->lbuf + off, (word_t)al);
 		}
 		/* REAPURB returns the urb pointer via the void** arg — give the guest back
 		 * its OWN urb address (what it passed to SUBMITURB). */
