@@ -1050,6 +1050,42 @@ if 'uknl_cam_dispatch' not in s:
                   '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);', 1)
     wr(EN, s)
 
+# ---- syscall/enter.c: USB (libusb) enablement — fake the netlink hotplug bind so
+#      stock libusb_init() succeeds. The C lives in patches/uknl_usb_redirect.c;
+#      inject it before translate_syscall_enter and call its dispatch right after
+#      the camera dispatch. ----
+EN = ROOT + "/syscall/enter.c"; s = rd(EN)
+if 'uknl_usb_dispatch' not in s:
+    _pd = os.path.dirname(os.path.abspath(__file__))
+    usb_c = rd(os.path.join(_pd, "uknl_usb_redirect.c"))
+    must('int translate_syscall_enter(Tracee *tracee)\n{' in s, "enter.c translate_syscall_enter anchor (usb)")
+    s = s.replace('int translate_syscall_enter(Tracee *tracee)\n{',
+                  usb_c + '\nint translate_syscall_enter(Tracee *tracee)\n{', 1)
+    usb_anchor = ('\tif (uknl_cam_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
+                  '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);')
+    must(usb_anchor in s, "enter.c cam-dispatch anchor (usb)")
+    s = s.replace(usb_anchor,
+                  '\tif (uknl_cam_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
+                  '\tif (uknl_usb_dispatch(tracee, syscall_number))\n\t\treturn 0;\n'
+                  '\tstatus = notify_extensions(tracee, SYSCALL_ENTER_START, 0, 0);', 1)
+    wr(EN, s)
+
+# ---- syscall/seccomp.c: trap bind() only when UK_USB is set (libusb netlink). ----
+SC = ROOT + "/syscall/seccomp.c"; s = rd(SC)
+if 'uk_usb_sysnums' not in s:
+    sc_anchor = 'status = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums, proot_sysnums);'
+    must(sc_anchor in s, "seccomp proot_sysnums merge anchor (usb)")
+    s = s.replace(sc_anchor, sc_anchor +
+                  '\n\t/* NeoTerm: trap bind() only when libusb support is wanted. */\n'
+                  '\tif (status >= 0 && getenv("UK_USB")) {\n'
+                  '\t\tstatic const FilteredSysnum uk_usb_sysnums[] = {\n'
+                  '\t\t\t{ PR_bind,\tFILTER_SYSEXIT },\n'
+                  '\t\t\tFILTERED_SYSNUM_END,\n'
+                  '\t\t};\n'
+                  '\t\tstatus = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums, uk_usb_sysnums);\n'
+                  '\t}', 1)
+    wr(SC, s)
+
 # ---- syscall/seccomp.c: trap the camera I/O syscalls only when UK_CAM is set. ----
 SC = ROOT + "/syscall/seccomp.c"; s = rd(SC)
 if 'uk_cam_sysnums' not in s:

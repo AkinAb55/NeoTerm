@@ -127,7 +127,36 @@ without in-proot strace):
    `/dev/bus/usb` markers, char-189 stat, and descriptor bytes per node (marker file
    content or proxied read). Then the USBDEVFS ioctl proxy on top.
 
-## Assessment
+## BREAKTHROUGH: device logs pinpoint the real blocker (netlink, not enumeration)
+
+`LIBUSB_DEBUG=5 lsusb` on the device (libusb 1.0.30) shows init dying *before*
+enumeration:
+
+    [op_init] could not find usbfs, defaulting to /dev/bus/usb
+    [op_init] sysfs is available
+    [linux_udev_start_event_monitor] could not initialize udev monitor
+    [op_init] error starting hotplug event monitor
+    unable to initialize libusb: -99
+
+So on device: **sysfs IS available** (enumeration path is fine), and `libusb_init`
+fails at the **udev/netlink hotplug monitor** — a `NETLINK_KOBJECT_UEVENT` socket
+whose `bind()` to a multicast group is SELinux-blocked for app uids. libusb treats
+that as fatal (-99). (This is exactly what the in-distro patch's "hotplug
+non-fatal" hunk worked around.)
+
+**Fix (implemented):** `proot/patches/uknl_usb_redirect.c` (UK_USB) fakes success
+for that one `bind()` — an `AF_NETLINK` socket binding to `nl_groups != 0`. The
+monitor then "starts" (no events ever arrive — fine, no uevents under proot) and
+`libusb_init()` succeeds. Host-verified scoping: a normal `AF_INET` bind still gets
+a real port; an `AF_NETLINK` group bind that the kernel would reject returns 0 only
+under `UK_USB`. Wired in `fakeid0-xattr.py` (dispatch after the camera shim + a
+`UK_USB` seccomp filter trapping `bind`); `ProotManager` exports `UK_USB=1`.
+
+→ Next, on device: confirm `lsusb` now initialises and whether it enumerates from
+the (available) sysfs. If enumeration is empty (sysfs readdir EACCES), add the
+fake `/sys/bus/usb`. Then `/dev/bus/usb` + the USBDEVFS ioctl proxy for I/O.
+
+## Assessment (superseded by the breakthrough above — kept for history)
 
 The no-patch path is a real **research effort**, materially harder than the camera:
 - libusb enumeration (libudev) is environment-finicky; a partial proot `/sys` bind

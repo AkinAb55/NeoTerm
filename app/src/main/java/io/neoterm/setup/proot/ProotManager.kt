@@ -502,6 +502,10 @@ object ProotManager {
     if (NeoPreference.isUsbStorageEnabled()) { env.add("UK_BLOCK=1"); env.add("UK_FS=1") }
     // Camera: trap the V4L2 syscalls (ioctl/read/poll/…) for the /dev/video0 shim.
     if (NeoPreference.isCameraEnabled()) { env.add("UK_CAM=1") }
+    // USB (libusb): trap bind() so the netlink udev-hotplug monitor can't fail
+    // libusb_init() (Android/SELinux blocks the netlink group bind). The USB host
+    // bridge is always active, so this is always on. Scoped to netlink monitors.
+    env.add("UK_USB=1")
     return env.toTypedArray()
   }
 }
