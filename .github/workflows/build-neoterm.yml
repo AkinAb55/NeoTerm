@@ -76,57 +76,10 @@ jobs:
           path: out/proot/aarch64/proot
           if-no-files-found: error
 
-  # ── 2) PulseAudio natív cross-build (Android-oldali hang) ───────────
-  build-pulseaudio:
-    name: PulseAudio (aarch64)
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Clone repository
-        uses: actions/checkout@v7
-
-      - name: Install host build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            meson ninja-build pkg-config cmake gettext m4 gperf \
-            autoconf automake libtool curl xz-utils file
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK
-        run: |
-          sdkmanager "ndk;${NDK_VERSION}"
-          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-
-      - name: Build PulseAudio
-        run: |
-          chmod +x audio/build-pulseaudio.sh
-          ./audio/build-pulseaudio.sh "${GITHUB_WORKSPACE}/out/pulseaudio" --api 28 --abi arm64-v8a
-
-      - name: Package
-        run: |
-          cd "${GITHUB_WORKSPACE}/out/pulseaudio"
-          tar -cf "${GITHUB_WORKSPACE}/out/pulseaudio-aarch64.tar" .
-          ls -lh "${GITHUB_WORKSPACE}/out/pulseaudio-aarch64.tar"
-
-      - name: Upload PulseAudio
-        uses: actions/upload-artifact@v7
-        with:
-          name: pulseaudio-aarch64
-          path: out/pulseaudio-aarch64.tar
-          if-no-files-found: error
-
-  # ── 3) NeoTerm APK (a proot binárist beágyazva) ─────────────────────────
+  # ── 2) NeoTerm APK (a proot binárist beágyazva, БЕЗ PulseAudio) ─────────
   build-apk:
     name: APK (${{ github.event.inputs.build_type || 'release' }})
-    needs: [build-proot, build-pulseaudio]
+    needs: [build-proot]
     runs-on: ubuntu-26.04
     steps:
       - name: Clone repository
@@ -158,7 +111,7 @@ jobs:
       - name: Decode Keystore File
         shell: bash
         run: |
-          # Декодируем ваш Termux-ключ напрямую в модуль app, как настроено в build.gradle
+          # Декодируем ваш Termux-ключ напрямую в модуль app
           echo "${{ secrets.SIGNING_KEY }}" | base64 --decode > app/testkey_untrusted.jks
 
       - name: Fetch proot binary
@@ -174,19 +127,6 @@ jobs:
              app/src/main/jniLibs/arm64-v8a/libproot.so
           chmod +x app/src/main/jniLibs/arm64-v8a/libproot.so
           ls -l app/src/main/jniLibs/arm64-v8a/
-
-      - name: Fetch PulseAudio build
-        uses: actions/download-artifact@v7
-        with:
-          name: pulseaudio-aarch64
-          path: ${{ github.workspace }}/pulseaudio-bin
-
-      - name: Bundle PulseAudio into APK (assets)
-        run: |
-          mkdir -p app/src/main/assets
-          cp "${GITHUB_WORKSPACE}/pulseaudio-bin/pulseaudio-aarch64.tar" \
-             app/src/main/assets/pulseaudio-aarch64.tar
-          ls -lh app/src/main/assets/pulseaudio-aarch64.tar
 
       - name: Bump version automatically (per build)
         run: |
@@ -209,7 +149,6 @@ jobs:
             ./gradlew :app:assembleDebug --stacktrace
           fi
         env:
-          # Передаем параметры подписи в Gradle из секретов
           RELEASE_STORE_FILE: "testkey_untrusted.jks"
           RELEASE_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.SIGNING_ALIAS }}
@@ -222,7 +161,7 @@ jobs:
           path: app/build/outputs/apk/**/*.apk
           if-no-files-found: error
 
-  # ── 4) disztró-rootfs-ek ────────────────────────────────────────────────
+  # ── 3) disztró-rootfs-ek ────────────────────────────────────────────────
   fetch-rootfs:
     name: rootfs tarballs
     runs-on: ubuntu-26.04
@@ -247,7 +186,7 @@ jobs:
           path: out/rootfs/**
           if-no-files-found: error
 
-  # ── 5) GitHub Release: APK (X11 beágyazva) + proot + rootfs-ek ──────────
+  # ── 4) GitHub Release: APK (X11 beágyazva) + proot + rootfs-ek ──────────
   release:
     name: Publish GitHub Release
     if: ${{ always() && (github.event.inputs.publish_release == 'true' || github.event_name == 'push') && needs.build-apk.result == 'success' && needs.build-proot.result == 'success' }}
@@ -304,7 +243,7 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --title "NeoTerm proot ($TAG)" \
-              --notes "proot-alapú NeoTerm. APK, proot bináris (aarch64) és disztró-rootfs-ek." \
+              --notes "proot-alapú NeoTerm (БЕЗ PulseAudio). APK, proot bináris (aarch64) és disztró-rootfs-ek." \
               --latest
           fi
           gh release upload "$TAG" assets/* --clobber
