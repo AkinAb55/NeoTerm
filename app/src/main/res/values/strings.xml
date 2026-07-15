@@ -5,7 +5,8 @@
   <string name="super_paste_text">Super Paste</string>
   <string name="text_selection_more">More</string>
   <string name="cc_button">CC</string>
-
+  <string name="shared_user_label">NeoTerm Shared Core</string>
+  
   <string name="custom_commands">Custom commands</string>
   <string name="cc_add">Add</string>
   <string name="cc_edit">Edit</string>
