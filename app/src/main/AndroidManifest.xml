@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sharedUserId="io.neoterm.shared"
+    android:sharedUserLabel="@string/shared_user_label">
 
   <uses-feature
     android:name="android.hardware.touchscreen"
@@ -7,12 +9,11 @@
   <uses-feature
     android:name="android.software.leanback"
     android:required="false"/>
-  <!-- USB host: detected/permissioned via a runtime BroadcastReceiver
+  <!-- USB host: detected/permissioned via a runtime BroadcastReceiver       
        (UsbBridge), not a manifest device_filter. -->
   <uses-feature
     android:name="android.hardware.usb.host"
     android:required="false"/>
-
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.INTERNET"/>
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
@@ -22,25 +23,25 @@
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-  <!-- Microphone: lets the bundled PulseAudio's AAudio source capture the device
+  <!-- Microphone: lets the bundled PulseAudio's AAudio source capture the device       
        mic so recording apps in the proot distro have audio input. -->
   <uses-permission android:name="android.permission.RECORD_AUDIO"/>
-  <!-- Camera: lets the CameraBridge serve the device camera as an MJPEG stream
+  <!-- Camera: lets the CameraBridge serve the device camera as an MJPEG stream       
        (NEOTERM_CAMERA_URL) to apps in the proot distro. -->
   <uses-permission android:name="android.permission.CAMERA"/>
   <uses-feature
     android:name="android.hardware.camera.any"
     android:required="false"/>
-  <!-- Location: lets the GpsBridge run a built-in gpsd (127.0.0.1:2947) serving
+  <!-- Location: lets the GpsBridge run a built-in gpsd (127.0.0.1:2947) serving       
        the device GPS to the distro. -->
   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
   <uses-feature
     android:name="android.hardware.location.gps"
     android:required="false"/>
-  <!-- Sensors: most sensors (accelerometer, gyroscope, magnetometer, light, proximity,
-       barometer, …) and battery status need NO permission. These cover the permission-gated
-       sensor categories so the distro can use every sensor: heart-rate/body sensors, the
+  <!-- Sensors: most sensors (accelerometer, gyroscope, magnetometer, light, proximity,       
+       barometer, …) and battery status need NO permission. These cover the permission-gated       
+       sensor categories so the distro can use every sensor: heart-rate/body sensors, the       
        step counter / activity recognition, and high-rate (>200Hz) sampling. -->
   <uses-permission android:name="android.permission.BODY_SENSORS"/>
   <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
@@ -60,7 +61,7 @@
     android:roundIcon="@mipmap/ic_launcher_neoterm_round"
     android:supportsRtl="true"
     android:theme="@style/AppTheme">
-
+    
     <provider
       android:name="androidx.core.content.FileProvider"
       android:authorities="${applicationId}.fileprovider"
@@ -79,14 +80,12 @@
       android:windowSoftInputMode="adjustResize|stateUnchanged">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
-
         <category android:name="android.intent.category.LAUNCHER"/>
       </intent-filter>
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
         <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
       </intent-filter>
-
       <meta-data
         android:name="android.app.shortcuts"
         android:resource="@xml/app_shortcuts"/>
@@ -97,7 +96,6 @@
       android:targetActivity="io.neoterm.ui.term.NeoTermActivity">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
-
         <category android:name="android.intent.category.IOT_LAUNCHER"/>
         <category android:name="android.intent.category.DEFAULT"/>
       </intent-filter>
@@ -122,7 +120,6 @@
       <intent-filter>
         <action android:name="android.intent.action.SEND"/>
         <action android:name="android.intent.action.MAIN"/>
-
         <data android:mimeType="*/*"/>
         <category android:name="android.intent.category.DEFAULT"/>
       </intent-filter>
@@ -137,25 +134,20 @@
         <action android:name="android.intent.action.SEND"/>
         <action android:name="android.intent.action.SEND_MULTIPLE"/>
         <action android:name="android.intent.action.MAIN"/>
-
         <data android:mimeType="*/*"/>
         <category android:name="android.intent.category.DEFAULT"/>
       </intent-filter>
       <intent-filter>
         <data android:scheme="file"/>
-
         <action android:name="android.intent.action.VIEW"/>
         <action android:name="android.intent.action.MAIN"/>
-
         <data android:mimeType="*/*"/>
         <category android:name="android.intent.category.DEFAULT"/>
       </intent-filter>
       <intent-filter>
         <action android:name="android.intent.action.VIEW"/>
-
         <category android:name="android.intent.category.BROWSABLE"/>
         <category android:name="android.intent.category.DEFAULT"/>
-
         <data android:scheme="http"/>
         <data android:scheme="https"/>
         <data android:scheme="ftp"/>
@@ -170,44 +162,53 @@
       android:exported="false"
       android:label="@string/about"
       android:theme="@style/AppTheme.NoActionBar.Dark"/>
+
     <activity
       android:name=".ui.other.CrashActivity"
       android:exported="false"
       android:label="@string/error"
       android:theme="@style/AppTheme.NoActionBar.Dark"/>
+
     <activity
       android:name=".ui.other.SetupActivity"
       android:configChanges="keyboardHidden|orientation|screenSize"
       android:exported="true"
       android:theme="@style/AppTheme.NoActionBar"/>
+
     <activity
       android:name=".ui.other.BonusActivity"
       android:configChanges="orientation|keyboardHidden"
       android:exported="false"
       android:theme="@style/AppTheme.NoActionBar.Dark"/>
+
     <activity
       android:name=".ui.pm.PackageManagerActivity"
       android:exported="false"
       android:label="@string/package_settings"
       android:theme="@style/AppTheme.NoActionBar.Dark"/>
+
     <activity
       android:name=".ui.customize.CustomizeActivity"
       android:exported="false"
       android:label="@string/customization_settings"
       android:theme="@style/AppTheme.NoActionBar.Dark"/>
+
     <activity
       android:name=".ui.customize.ColorSchemeActivity"
       android:exported="false"
       android:label="@string/pref_customization_color_scheme"
       android:theme="@style/AppTheme.NoActionBar.Dark"/>
+
     <activity
       android:name=".ui.settings.SettingActivity"
       android:exported="false"
       android:theme="@style/AppTheme.Dark"/>
+
     <activity
       android:name=".ui.settings.GeneralSettingsActivity"
       android:exported="false"
       android:theme="@style/AppTheme.Dark"/>
+
     <activity
       android:name=".ui.settings.UISettingsActivity"
       android:exported="false"
@@ -220,10 +221,8 @@
     <meta-data
       android:name="com.sec.android.support.multiwindow"
       android:value="true"/>
-
     <meta-data
       android:name="com.lge.support.SPLIT_WINDOW"
       android:value="true"/>
   </application>
-
 </manifest>
